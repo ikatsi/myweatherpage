@@ -1,0 +1,74 @@
+name: Build Cyprus rain intensity maps
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+
+concurrency:
+  group: rain-cy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      MPLBACKEND: Agg
+      CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
+      GEOJSON_PASS:       ${{ secrets.GEOJSON_PASS }}
+      FTP_HOST:           ${{ secrets.FTP_HOST }}
+      FTP_USER:           ${{ secrets.FTP_USER }}
+      FTP_PASS:           ${{ secrets.FTP_PASS }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-rain-cy-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-rain-cy-
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install --only-binary=:all: \
+            numpy pandas matplotlib scipy requests \
+            rasterio shapely pyproj fiona geopandas pyogrio
+
+      - name: Decrypt cyprus.geojson if needed
+        if: ${{ hashFiles('cyprus.geojson') == '' }}
+        run: |
+          test -f cyprus.geojson.enc || { echo "cyprus.geojson.enc missing"; exit 1; }
+          test -n "${GEOJSON_PASS}"   || { echo "GEOJSON_PASS not set"; exit 1; }
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in cyprus.geojson.enc \
+            -out cyprus.geojson \
+            -pass pass:"${GEOJSON_PASS}"
+          ls -l cyprus.geojson
+
+      - name: Run rainintensity_cyprus.py
+        run: |
+          python -V
+          python rainintensity_cyprus.py
+
+      - name: Upload PNG artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyprusrainintensitymaps
+          path: cyprusrainintensitymaps/*.png
+          if-no-files-found: warn
+          retention-days: 7
