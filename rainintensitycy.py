@@ -60,9 +60,9 @@ if not os.path.exists(GEOJSON_PATH):
         "Did you forget to decrypt cyprus.geojson.enc before running?"
     )
 
-# DEM (Copernicus 30m DSM GeoTIFF)
-VECTORS_DIR = os.path.join(BASE_DIR, "vectors")
-ALT_TIF_PATH = os.path.join(VECTORS_DIR, "cy_Copernicus Global DSM 30m.tif")
+# DEM (Copernicus 90m DSM GeoTIFF)
+VECTORS_DIR = BASE_DIR
+ALT_TIF_PATH = os.path.join(BASE_DIR, "cyprus_dsm_90m.tif")
 
 # Station feed
 RAIN_URL = os.environ.get("CURRENTWEATHER_URL")
