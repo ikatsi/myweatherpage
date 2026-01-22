@@ -15,7 +15,8 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
+
     env:
       MPLBACKEND: Agg
       CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
@@ -48,21 +49,28 @@ jobs:
             numpy pandas matplotlib scipy requests \
             rasterio shapely pyproj fiona geopandas pyogrio
 
-      - name: Decrypt cyprus.geojson if needed
-        if: ${{ hashFiles('cyprus.geojson') == '' }}
+      - name: Decrypt Cyprus GeoJSON
         run: |
           test -f cyprus.geojson.enc || { echo "cyprus.geojson.enc missing"; exit 1; }
-          test -n "${GEOJSON_PASS}"   || { echo "GEOJSON_PASS not set"; exit 1; }
           openssl enc -d -aes-256-cbc -pbkdf2 \
             -in cyprus.geojson.enc \
             -out cyprus.geojson \
             -pass pass:"${GEOJSON_PASS}"
-          ls -l cyprus.geojson
+          ls -lh cyprus.geojson
 
-      - name: Run rainintensitycy.py
+      - name: Decrypt Cyprus altitude raster
+        run: |
+          test -f cyprus.tif.enc || { echo "cyprus.tif.enc missing"; exit 1; }
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in cyprus.tif.enc \
+            -out cyprus_dsm_90m.tif \
+            -pass pass:"${GEOJSON_PASS}"
+          ls -lh cyprus_dsm_90m.tif
+
+      - name: Run rainintensity_cyprus.py
         run: |
           python -V
-          python rainintensitycy.py
+          python rainintensity_cyprus.py
 
       - name: Upload PNG artifacts
         if: always()
