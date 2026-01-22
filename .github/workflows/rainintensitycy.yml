@@ -59,10 +59,10 @@ jobs:
             -pass pass:"${GEOJSON_PASS}"
           ls -l cyprus.geojson
 
-      - name: Run rainintensity_cyprus.py
+      - name: Run rainintensitycy.py
         run: |
           python -V
-          python rainintensity_cyprus.py
+          python rainintensitycy.py
 
       - name: Upload PNG artifacts
         if: always()
