@@ -51,6 +51,7 @@ import requests
 
 # === CONFIGURATION ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CACHE_TXT = os.path.join(BASE_DIR, "weathernow_cached.txt")
 
 GEOJSON_PATH = os.path.join(BASE_DIR, "greece.geojson")
 ALT_VRT_PATH = os.path.join(BASE_DIR, "GRC_alt.vrt")
