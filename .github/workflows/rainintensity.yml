@@ -1,0 +1,87 @@
+name: Build rain intensity maps
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+
+concurrency:
+  group: rain-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
+      GEOJSON_PASS:       ${{ secrets.GEOJSON_PASS }}
+      FTP_HOST:           ${{ secrets.FTP_HOST }}
+      FTP_USER:           ${{ secrets.FTP_USER }}
+      FTP_PASS:           ${{ secrets.FTP_PASS }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-rain-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-rain-
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install --only-binary=:all: \
+            numpy pandas matplotlib scipy requests \
+            rasterio shapely pyproj fiona geopandas pyogrio
+
+      - name: Decrypt greece.geojson if needed
+        if: ${{ hashFiles('greece.geojson') == '' }}
+        run: |
+          test -f greece.geojson.enc || { echo "greece.geojson.enc missing"; exit 1; }
+          test -n "${GEOJSON_PASS}"   || { echo "GEOJSON_PASS not set"; exit 1; }
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in greece.geojson.enc \
+            -out greece.geojson \
+            -pass pass:"${GEOJSON_PASS}"
+          ls -l greece.geojson
+
+      - name: Decrypt and unzip altitude bundle if needed
+        run: |
+          if [ ! -f GRC_alt.vrt ]; then
+            test -f altitude.zip.enc || { echo "altitude.zip.enc missing"; exit 1; }
+            test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
+            openssl enc -d -aes-256-cbc -pbkdf2 \
+              -in altitude.zip.enc \
+              -out altitude.zip \
+              -pass pass:"${GEOJSON_PASS}"
+            unzip -o altitude.zip
+            rm -f altitude.zip
+          fi
+          ls -l GRC_alt.*
+
+      - name: Run rainintensity.py
+        run: |
+          python -V
+          python rainintensity.py
+
+      - name: Upload PNG artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rainintensitymaps
+          path: rainintensitymaps/*.png
+          if-no-files-found: warn
+          retention-days: 7
