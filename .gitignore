@@ -1,0 +1,6 @@
+greece.geojson
+altitude.zip
+*.pyc
+__pycache__/
+Tnowmaps/
+rainintensitymaps/
