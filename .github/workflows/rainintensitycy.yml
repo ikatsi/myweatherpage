@@ -21,11 +21,14 @@ jobs:
       MPLBACKEND: Agg
       TZ: Europe/Athens
 
+      # still used for decrypt + FTP upload
+      GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
+      FTP_HOST:     ${{ secrets.FTP_HOST }}
+      FTP_USER:     ${{ secrets.FTP_USER }}
+      FTP_PASS:     ${{ secrets.FTP_PASS }}
+
+      # IMPORTANT: we will overwrite CURRENTWEATHER_URL at runtime to point to local file
       CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
-      GEOJSON_PASS:       ${{ secrets.GEOJSON_PASS }}
-      FTP_HOST:           ${{ secrets.FTP_HOST }}
-      FTP_USER:           ${{ secrets.FTP_USER }}
-      FTP_PASS:           ${{ secrets.FTP_PASS }}
 
     steps:
       - name: Checkout
@@ -39,7 +42,6 @@ jobs:
           date -u +"UTC now: %Y-%m-%d %H:%M:%S"
           date +"Local now: %Y-%m-%d %H:%M:%S %Z"
           echo "TZ=$TZ"
-          echo "CURRENTWEATHER_URL is set? -> $( [ -n "$CURRENTWEATHER_URL" ] && echo yes || echo no )"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -83,32 +85,123 @@ jobs:
             -pass pass:"${GEOJSON_PASS}"
           ls -lh cyprus_dsm_90m.tif
 
-      - name: Debug feed via Python requests (same path as scripts)
+      - name: Fetch weathernow feed via FTPS (avoid reCAPTCHA HTTP blocks)
         shell: bash
         run: |
           python - << 'PY'
-          import os, requests
-          url = os.environ.get("CURRENTWEATHER_URL","")
-          print("URL set:", bool(url))
-          if not url:
-            raise SystemExit("CURRENTWEATHER_URL missing")
-          headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-            "Accept": "text/plain,text/*;q=0.9,*/*;q=0.8",
-            "Connection": "close",
-          }
-          r = requests.get(url, headers=headers, timeout=30)
-          print("HTTP:", r.status_code)
-          txt = (r.text or "")
-          first_line = txt.splitlines()[0].strip() if txt.strip() else ""
-          print("First line:", first_line[:200])
-          print("Has 'Datetime' anywhere:", ("Datetime" in txt))
-          print("Body length:", len(txt))
+          import os
+          from ftplib import FTP_TLS
+
+          host = os.environ["FTP_HOST"]
+          user = os.environ["FTP_USER"]
+          pw   = os.environ["FTP_PASS"]
+
+          candidates = [
+            "weathernow.txt",
+            "cronjobs/weathernow.txt",
+            "public_html/cronjobs/weathernow.txt",
+            "www/cronjobs/weathernow.txt",
+            "httpdocs/cronjobs/weathernow.txt",
+            "htdocs/cronjobs/weathernow.txt",
+          ]
+
+          def try_retrieve(ftps, remote_path, local_path):
+            try:
+              with open(local_path, "wb") as f:
+                ftps.retrbinary("RETR " + remote_path, f.write)
+              return True
+            except Exception:
+              return False
+
+          ftps = FTP_TLS()
+          ftps.connect(host, 21, timeout=30)
+          ftps.auth()
+          ftps.login(user=user, passwd=pw)
+          ftps.prot_p()
+          ftps.set_pasv(True)
+
+          local = "weathernow.txt"
+          ok = False
+
+          # 1) try common paths
+          for p in candidates:
+            if try_retrieve(ftps, p, local):
+              print("✅ downloaded:", p, "->", local)
+              ok = True
+              break
+
+          # 2) brute search a bit if common paths failed
+          if not ok:
+            # try listing root and one level deep
+            try:
+              root = ftps.nlst()
+            except Exception:
+              root = []
+            # normalize: remove "." ".."
+            root = [r for r in root if r and r not in (".", "..")]
+
+            # direct match in root listing
+            for r in root:
+              if r.endswith("weathernow.txt"):
+                if try_retrieve(ftps, r, local):
+                  print("✅ downloaded:", r, "->", local)
+                  ok = True
+                  break
+
+            # one level deep in dirs that look promising
+            if not ok:
+              likely_dirs = []
+              for r in root:
+                name = r.lower()
+                if ("cron" in name) or ("www" in name) or ("http" in name) or ("html" in name) or ("htdocs" in name):
+                  likely_dirs.append(r)
+
+              for d in likely_dirs[:8]:
+                try:
+                  ftps.cwd(d)
+                except Exception:
+                  continue
+                try:
+                  items = ftps.nlst()
+                except Exception:
+                  items = []
+                # go back to root
+                try:
+                  ftps.cwd("/")
+                except Exception:
+                  pass
+
+                for it in items:
+                  if it.endswith("weathernow.txt"):
+                    candidate = f"{d}/{it}"
+                    if try_retrieve(ftps, candidate, local):
+                      print("✅ downloaded:", candidate, "->", local)
+                      ok = True
+                      break
+                if ok:
+                  break
+
+          try:
+            ftps.quit()
+          except Exception:
+            pass
+
+          if not ok:
+            raise SystemExit("❌ Could not find/download weathernow.txt via FTPS")
+
+          # sanity print
+          import pathlib
+          p = pathlib.Path(local)
+          print("local size:", p.stat().st_size)
+          with p.open("r", encoding="utf-8", errors="replace") as f:
+            first = f.readline().strip()
+          print("first line:", first[:200])
           PY
 
-      - name: Run rainintensitycy.py
+      - name: Run rainintensitycy.py (using local feed)
         shell: bash
         run: |
+          export CURRENTWEATHER_URL="./weathernow.txt"
           python -V
           python rainintensitycy.py
 
