@@ -83,22 +83,28 @@ jobs:
             -pass pass:"${GEOJSON_PASS}"
           ls -lh cyprus_dsm_90m.tif
 
-      - name: Debug feed (headers + first lines)
+      - name: Debug feed via Python requests (same path as scripts)
         shell: bash
         run: |
-          set +e
-          echo "URL=$CURRENTWEATHER_URL"
-          echo ""
-          echo "---- curl -I (headers) ----"
-          curl -I -L "$CURRENTWEATHER_URL"
-          echo ""
-          echo "---- curl first 60 lines ----"
-          curl -L "$CURRENTWEATHER_URL" | head -n 60
-          echo ""
-          echo "---- curl first 300 bytes (escaped newlines) ----"
-          curl -L "$CURRENTWEATHER_URL" | head -c 300 | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g'
-          echo ""
-          set -e
+          python - << 'PY'
+          import os, requests
+          url = os.environ.get("CURRENTWEATHER_URL","")
+          print("URL set:", bool(url))
+          if not url:
+            raise SystemExit("CURRENTWEATHER_URL missing")
+          headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+            "Accept": "text/plain,text/*;q=0.9,*/*;q=0.8",
+            "Connection": "close",
+          }
+          r = requests.get(url, headers=headers, timeout=30)
+          print("HTTP:", r.status_code)
+          txt = (r.text or "")
+          first_line = txt.splitlines()[0].strip() if txt.strip() else ""
+          print("First line:", first_line[:200])
+          print("Has 'Datetime' anywhere:", ("Datetime" in txt))
+          print("Body length:", len(txt))
+          PY
 
       - name: Run rainintensitycy.py
         shell: bash
