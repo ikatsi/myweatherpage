@@ -135,7 +135,7 @@ ISO_ALT_MAX_M = 5000
 # =========================
 def robust_fetch_text(url: str, timeout: int = 60, tries: int = 6):
     """
-    Returns (text, source) where source is one of: "network", "curl", "cache"
+    Returns (text, source) where source is one of: "network", "curl", "cache", "localfile"
     """
     headers = {
         "User-Agent": (
@@ -205,6 +205,17 @@ def robust_fetch_text(url: str, timeout: int = 60, tries: int = 6):
         print(f"[fetch] using cached file: {CACHE_TXT}")
         with open(CACHE_TXT, "r", encoding="utf-8", errors="replace") as f:
             return f.read(), "cache"
+
+    # local file support (for GitHub Actions: fetch via FTPS, then point CURRENTWEATHER_URL to ./weathernow.txt)
+    if url.startswith("file://"):
+        path = url[7:]
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                return f.read(), "localfile"
+
+    if os.path.exists(url):
+        with open(url, "r", encoding="utf-8", errors="replace") as f:
+            return f.read(), "localfile"
 
     raise RuntimeError(f"Failed to fetch {url}") from last_err
 
