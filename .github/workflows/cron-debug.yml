@@ -1,18 +1,12 @@
 name: cron-debug
 
-on:
-  workflow_dispatch:
+"on":
   schedule:
     - cron: "*/5 * * * *"
-
-permissions:
-  contents: read
+  workflow_dispatch:
 
 jobs:
-  ping:
+  debug:
     runs-on: ubuntu-latest
     steps:
-      - name: Show time
-        run: |
-          echo "UTC now: $(date -u)"
-          echo "Local now: $(date)"
+      - run: date -u
