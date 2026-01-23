@@ -65,10 +65,13 @@ VECTORS_DIR = BASE_DIR
 ALT_TIF_PATH = os.path.join(BASE_DIR, "cyprus_dsm_90m.tif")
 
 # Station feed
+# Station feed
 RAIN_URL = os.environ.get("CURRENTWEATHER_URL")
 if not RAIN_URL:
-    raise SystemExit("❌ CURRENTWEATHER_URL environment variable is not set.")
+    raise SystemExit("❌ CURRENTWEATHER_URL not set")
+
 CACHE_TXT = os.path.join(BASE_DIR, "weathernow_cyprus_cached.txt")
+
 
 # Cyprus bbox in lon/lat (for station filtering only)
 LON_MIN, LON_MAX = 32.0, 34.9
@@ -600,7 +603,12 @@ def main():
     data["Latitude"] = pd.to_numeric(data["Latitude"], errors="coerce")
     data["Longitude"] = pd.to_numeric(data["Longitude"], errors="coerce")
     data["RainIntensity"] = pd.to_numeric(data["RainIntensity"], errors="coerce")
+    # Parse datetimes as naive first, then localize to Athens (same as Attica)
     data["Datetime"] = pd.to_datetime(data["Datetime"], errors="coerce")
+    data["Datetime"] = data["Datetime"].dt.tz_localize(
+    "Europe/Athens", ambiguous="NaT", nonexistent="NaT"
+    )
+
 
     if "TNow" in data.columns:
         data["TNow"] = pd.to_numeric(data["TNow"], errors="coerce")
@@ -629,16 +637,15 @@ def main():
         after = len(data)
         print(f"🧹 remove bad webcodes {bad}: {before} -> {after} (removed {before - after})")
 
-    # --- time filter (feed is Europe/Athens naive) ---
-    athens_now_aware = datetime.now(ZoneInfo("Europe/Athens"))
-    athens_now_naive = athens_now_aware.replace(tzinfo=None)
-    time_threshold = athens_now_naive - timedelta(minutes=TIME_WINDOW_MIN)
-
-    print("athens_now:", athens_now_aware)
+    # Filter only recent stations (Athens time, tz-aware like Attica)
+    athens_now = datetime.now(ZoneInfo("Europe/Athens"))
+    time_threshold = athens_now - timedelta(minutes=TIME_WINDOW_MIN)
+    
+    print("athens_now:", athens_now)
     print("max file datetime:", data["Datetime"].max())
     print("min file datetime:", data["Datetime"].min())
     print("time_threshold:", time_threshold)
-
+    
     before = len(data)
     filtered = data[data["Datetime"] >= time_threshold].copy()
     after = len(filtered)
@@ -750,7 +757,7 @@ def main():
 
     # --- output paths ---
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    timestamp = athens_now_aware.strftime("%Y-%m-%d-%H-%M")
+    timestamp = athens_now.strftime("%Y-%m-%d-%H-%M")
     out_png = os.path.join(OUTPUT_DIR, f"{PREFIX}{timestamp}.png")
     out_latest = os.path.join(OUTPUT_DIR, LATEST_NAME)
 
@@ -835,7 +842,7 @@ def main():
     ax.set_title("Υπολογ. τελευταία διαθέσιμη ραγδαιότητα υετού", fontsize=14, pad=10, loc="center")
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
-    timestamp_text = athens_now_aware.strftime("Δημιουργήθηκε: %Y-%m-%d %H:%M %Z για το e-kairos.gr")
+    timestamp_text = athens_now.strftime("Δημιουργήθηκε: %Y-%m-%d %H:%M %Z για το e-kairos.gr")
     ax.text(
         0.01, 0.01, timestamp_text,
         transform=ax.transAxes,
