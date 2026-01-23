@@ -154,10 +154,24 @@ def robust_fetch_text(url: str, timeout: int = 60, tries: int = 6):
         try:
             r = session.get(url, headers=headers, timeout=timeout)
             r.raise_for_status()
-            text = r.text
-            if not text or "Datetime" not in text:
-                raise RuntimeError("Downloaded content looks empty or malformed.")
+            text = r.text or ""
+            head = text[:300].replace("\n", "\\n")
+
+            # Accept either "Datetime" header or a tab-separated first line that starts with it
+            first_line = text.splitlines()[0].strip() if text.strip() else ""
+            looks_like_tsv = ("\t" in first_line) and (len(first_line) >= 10)
+
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP {r.status_code}. First 300 chars: {head}")
+
+            if not text.strip():
+                raise RuntimeError(f"Empty response body. First 300 chars: {head}")
+
+            if ("Datetime" not in text) and (not looks_like_tsv):
+                raise RuntimeError(f"Response is not expected TSV. First line: {first_line[:200]} | First 300 chars: {head}")
+
             return text, "network"
+
         except Exception as e:
             last_err = e
             sleep_s = min(2 ** attempt, 20) + random.random()
@@ -173,10 +187,16 @@ def robust_fetch_text(url: str, timeout: int = 60, tries: int = 6):
             capture_output=True,
             text=True,
         )
-        text = cp.stdout
-        if text and "Datetime" in text:
+        text = cp.stdout or ""
+        head = text[:300].replace("\n", "\\n")
+        first_line = text.splitlines()[0].strip() if text.strip() else ""
+        looks_like_tsv = ("\t" in first_line) and (len(first_line) >= 10)
+
+        if text.strip() and (("Datetime" in text) or looks_like_tsv):
             return text, "curl"
-        raise RuntimeError("curl returned empty/malformed content.")
+
+        raise RuntimeError(f"curl returned empty/non-TSV. First line: {first_line[:200]} | First 300 chars: {head}")
+
     except Exception as e:
         print(f"[fetch] curl fallback failed: {e}")
 
@@ -554,7 +574,9 @@ def main():
     except Exception as e:
         raise SystemExit(f"❌ Failed to fetch {RAIN_URL}: {e}")
 
-    data = pd.read_csv(StringIO(text), delimiter="\t")
+    data = pd.read_csv(StringIO(text), sep="\t", engine="python")
+    data.columns = [str(c).replace("\ufeff", "").strip() for c in data.columns]
+
 
     # --- required columns ---
     needed = ["Latitude", "Longitude", "RainIntensity", "Datetime"]
