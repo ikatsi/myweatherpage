@@ -6,7 +6,7 @@ on:
     - cron: "*/15 * * * *"
 
 concurrency:
-  group: rain-cy-${{ github.workflow }}-${{ github.ref }}
+  group: rain-cyprus-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -19,29 +19,15 @@ jobs:
 
     env:
       MPLBACKEND: Agg
-      TZ: Europe/Athens
-
-      # still used for decrypt + FTP upload
-      GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
-      FTP_HOST:     ${{ secrets.FTP_HOST }}
-      FTP_USER:     ${{ secrets.FTP_USER }}
-      FTP_PASS:     ${{ secrets.FTP_PASS }}
-
-      # IMPORTANT: we will overwrite CURRENTWEATHER_URL at runtime to point to local file
       CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
+      GEOJSON_PASS:       ${{ secrets.GEOJSON_PASS }}
+      FTP_HOST:           ${{ secrets.FTP_HOST }}
+      FTP_USER:           ${{ secrets.FTP_USER }}
+      FTP_PASS:           ${{ secrets.FTP_PASS }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Debug context
-        run: |
-          echo "event=${{ github.event_name }}"
-          echo "ref=${{ github.ref }}"
-          echo "sha=${{ github.sha }}"
-          date -u +"UTC now: %Y-%m-%d %H:%M:%S"
-          date +"Local now: %Y-%m-%d %H:%M:%S %Z"
-          echo "TZ=$TZ"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -52,9 +38,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-rain-cy-${{ hashFiles('**/requirements.txt') }}
+          key: ${{ runner.os }}-pip-cyprus-${{ hashFiles('**/requirements.txt') }}
           restore-keys: |
-            ${{ runner.os }}-pip-rain-cy-
+            ${{ runner.os }}-pip-cyprus-
 
       - name: Install Python deps
         run: |
@@ -64,9 +50,7 @@ jobs:
             rasterio shapely pyproj fiona geopandas pyogrio
 
       - name: Decrypt Cyprus GeoJSON
-        shell: bash
         run: |
-          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
           test -f cyprus.geojson.enc || { echo "cyprus.geojson.enc missing"; exit 1; }
           openssl enc -d -aes-256-cbc -pbkdf2 \
             -in cyprus.geojson.enc \
@@ -74,142 +58,25 @@ jobs:
             -pass pass:"${GEOJSON_PASS}"
           ls -lh cyprus.geojson
 
-      - name: Decrypt Cyprus altitude raster
-        shell: bash
+      - name: Decrypt Cyprus DSM GeoTIFF
         run: |
-          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
-          test -f cyprus.tif.enc || { echo "cyprus.tif.enc missing"; exit 1; }
+          test -f cyprus_dsm_90m.tif.enc || { echo "cyprus_dsm_90m.tif.enc missing"; exit 1; }
           openssl enc -d -aes-256-cbc -pbkdf2 \
-            -in cyprus.tif.enc \
+            -in cyprus_dsm_90m.tif.enc \
             -out cyprus_dsm_90m.tif \
             -pass pass:"${GEOJSON_PASS}"
           ls -lh cyprus_dsm_90m.tif
 
-      - name: Fetch weathernow feed via FTPS (avoid reCAPTCHA HTTP blocks)
-        shell: bash
+      - name: Run rainintensity_cyprus.py
         run: |
-          python - << 'PY'
-          import os
-          from ftplib import FTP_TLS
-
-          host = os.environ["FTP_HOST"]
-          user = os.environ["FTP_USER"]
-          pw   = os.environ["FTP_PASS"]
-
-          candidates = [
-            "weathernow.txt",
-            "cronjobs/weathernow.txt",
-            "public_html/cronjobs/weathernow.txt",
-            "www/cronjobs/weathernow.txt",
-            "httpdocs/cronjobs/weathernow.txt",
-            "htdocs/cronjobs/weathernow.txt",
-          ]
-
-          def try_retrieve(ftps, remote_path, local_path):
-            try:
-              with open(local_path, "wb") as f:
-                ftps.retrbinary("RETR " + remote_path, f.write)
-              return True
-            except Exception:
-              return False
-
-          ftps = FTP_TLS()
-          ftps.connect(host, 21, timeout=30)
-          ftps.auth()
-          ftps.login(user=user, passwd=pw)
-          ftps.prot_p()
-          ftps.set_pasv(True)
-
-          local = "weathernow.txt"
-          ok = False
-
-          # 1) try common paths
-          for p in candidates:
-            if try_retrieve(ftps, p, local):
-              print("✅ downloaded:", p, "->", local)
-              ok = True
-              break
-
-          # 2) brute search a bit if common paths failed
-          if not ok:
-            # try listing root and one level deep
-            try:
-              root = ftps.nlst()
-            except Exception:
-              root = []
-            # normalize: remove "." ".."
-            root = [r for r in root if r and r not in (".", "..")]
-
-            # direct match in root listing
-            for r in root:
-              if r.endswith("weathernow.txt"):
-                if try_retrieve(ftps, r, local):
-                  print("✅ downloaded:", r, "->", local)
-                  ok = True
-                  break
-
-            # one level deep in dirs that look promising
-            if not ok:
-              likely_dirs = []
-              for r in root:
-                name = r.lower()
-                if ("cron" in name) or ("www" in name) or ("http" in name) or ("html" in name) or ("htdocs" in name):
-                  likely_dirs.append(r)
-
-              for d in likely_dirs[:8]:
-                try:
-                  ftps.cwd(d)
-                except Exception:
-                  continue
-                try:
-                  items = ftps.nlst()
-                except Exception:
-                  items = []
-                # go back to root
-                try:
-                  ftps.cwd("/")
-                except Exception:
-                  pass
-
-                for it in items:
-                  if it.endswith("weathernow.txt"):
-                    candidate = f"{d}/{it}"
-                    if try_retrieve(ftps, candidate, local):
-                      print("✅ downloaded:", candidate, "->", local)
-                      ok = True
-                      break
-                if ok:
-                  break
-
-          try:
-            ftps.quit()
-          except Exception:
-            pass
-
-          if not ok:
-            raise SystemExit("❌ Could not find/download weathernow.txt via FTPS")
-
-          # sanity print
-          import pathlib
-          p = pathlib.Path(local)
-          print("local size:", p.stat().st_size)
-          with p.open("r", encoding="utf-8", errors="replace") as f:
-            first = f.readline().strip()
-          print("first line:", first[:200])
-          PY
-
-      - name: Run rainintensitycy.py (using local feed)
-        shell: bash
-        run: |
-          export CURRENTWEATHER_URL="./weathernow.txt"
           python -V
-          python rainintensitycy.py
+          python rainintensity_cyprus.py
 
       - name: Upload PNG artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cyprusrainintensitymaps
+          name: rainintensity_cyprus
           path: cyprusrainintensitymaps/*.png
           if-no-files-found: warn
           retention-days: 7
