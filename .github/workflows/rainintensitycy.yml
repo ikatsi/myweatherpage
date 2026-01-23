@@ -19,6 +19,8 @@ jobs:
 
     env:
       MPLBACKEND: Agg
+      TZ: Europe/Athens
+
       CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
       GEOJSON_PASS:       ${{ secrets.GEOJSON_PASS }}
       FTP_HOST:           ${{ secrets.FTP_HOST }}
@@ -28,6 +30,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Debug context
+        run: |
+          echo "event=${{ github.event_name }}"
+          echo "ref=${{ github.ref }}"
+          echo "sha=${{ github.sha }}"
+          date -u +"UTC now: %Y-%m-%d %H:%M:%S"
+          date +"Local now: %Y-%m-%d %H:%M:%S %Z"
+          echo "TZ=$TZ"
+          echo "CURRENTWEATHER_URL is set? -> $( [ -n "$CURRENTWEATHER_URL" ] && echo yes || echo no )"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -50,7 +62,9 @@ jobs:
             rasterio shapely pyproj fiona geopandas pyogrio
 
       - name: Decrypt Cyprus GeoJSON
+        shell: bash
         run: |
+          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
           test -f cyprus.geojson.enc || { echo "cyprus.geojson.enc missing"; exit 1; }
           openssl enc -d -aes-256-cbc -pbkdf2 \
             -in cyprus.geojson.enc \
@@ -59,7 +73,9 @@ jobs:
           ls -lh cyprus.geojson
 
       - name: Decrypt Cyprus altitude raster
+        shell: bash
         run: |
+          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
           test -f cyprus.tif.enc || { echo "cyprus.tif.enc missing"; exit 1; }
           openssl enc -d -aes-256-cbc -pbkdf2 \
             -in cyprus.tif.enc \
@@ -67,7 +83,25 @@ jobs:
             -pass pass:"${GEOJSON_PASS}"
           ls -lh cyprus_dsm_90m.tif
 
+      - name: Debug feed (headers + first lines)
+        shell: bash
+        run: |
+          set +e
+          echo "URL=$CURRENTWEATHER_URL"
+          echo ""
+          echo "---- curl -I (headers) ----"
+          curl -I -L "$CURRENTWEATHER_URL"
+          echo ""
+          echo "---- curl first 60 lines ----"
+          curl -L "$CURRENTWEATHER_URL" | head -n 60
+          echo ""
+          echo "---- curl first 300 bytes (escaped newlines) ----"
+          curl -L "$CURRENTWEATHER_URL" | head -c 300 | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g'
+          echo ""
+          set -e
+
       - name: Run rainintensitycy.py
+        shell: bash
         run: |
           python -V
           python rainintensitycy.py
