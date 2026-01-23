@@ -5,11 +5,14 @@ on:
   schedule:
     - cron: "*/5 * * * *"
 
+permissions:
+  contents: read
+
 jobs:
-  echo:
+  ping:
     runs-on: ubuntu-latest
     steps:
-      - run: |
-          echo "event=${{ github.event_name }}"
-          echo "ref=${{ github.ref }}"
-          date -u +"UTC now: %Y-%m-%d %H:%M:%S"
+      - name: Show time
+        run: |
+          echo "UTC now: $(date -u)"
+          echo "Local now: $(date)"
