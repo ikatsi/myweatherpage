@@ -147,6 +147,18 @@ def robust_fetch_text(url: str, timeout: int = 60, tries: int = 6):
         "Connection": "close",
     }
 
+    # local file support first (fast path)
+    if url.startswith("file://"):
+        path = url[7:]
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                return f.read(), "localfile"
+
+    if os.path.exists(url):
+        with open(url, "r", encoding="utf-8", errors="replace") as f:
+            return f.read(), "localfile"
+
+    
     last_err = None
     session = requests.Session()
 
@@ -205,17 +217,6 @@ def robust_fetch_text(url: str, timeout: int = 60, tries: int = 6):
         print(f"[fetch] using cached file: {CACHE_TXT}")
         with open(CACHE_TXT, "r", encoding="utf-8", errors="replace") as f:
             return f.read(), "cache"
-
-    # local file support (for GitHub Actions: fetch via FTPS, then point CURRENTWEATHER_URL to ./weathernow.txt)
-    if url.startswith("file://"):
-        path = url[7:]
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                return f.read(), "localfile"
-
-    if os.path.exists(url):
-        with open(url, "r", encoding="utf-8", errors="replace") as f:
-            return f.read(), "localfile"
 
     raise RuntimeError(f"Failed to fetch {url}") from last_err
 
