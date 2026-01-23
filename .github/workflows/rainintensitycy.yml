@@ -51,6 +51,7 @@ jobs:
 
       - name: Decrypt Cyprus GeoJSON
         run: |
+          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
           test -f cyprus.geojson.enc || { echo "cyprus.geojson.enc missing"; exit 1; }
           openssl enc -d -aes-256-cbc -pbkdf2 \
             -in cyprus.geojson.enc \
@@ -58,11 +59,12 @@ jobs:
             -pass pass:"${GEOJSON_PASS}"
           ls -lh cyprus.geojson
 
-      - name: Decrypt Cyprus DSM GeoTIFF
+      - name: Decrypt Cyprus altitude GeoTIFF
         run: |
-          test -f cyprus_dsm_90m.tif.enc || { echo "cyprus_dsm_90m.tif.enc missing"; exit 1; }
+          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
+          test -f cyprus.tif.enc || { echo "cyprus.tif.enc missing"; exit 1; }
           openssl enc -d -aes-256-cbc -pbkdf2 \
-            -in cyprus_dsm_90m.tif.enc \
+            -in cyprus.tif.enc \
             -out cyprus_dsm_90m.tif \
             -pass pass:"${GEOJSON_PASS}"
           ls -lh cyprus_dsm_90m.tif
