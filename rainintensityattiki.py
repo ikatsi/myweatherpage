@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# rain_intensity_attica_egsa2100.py
+# rainintensityattiki.py
 #
 # Same map, but EVERYTHING is handled/plotted in Greek Grid (EGSA87) EPSG:2100:
 # - Interpolation grid is in meters (EPSG:2100)
@@ -49,9 +49,10 @@ from shapely.geometry import box
 import requests
 
 
-# === CONFIGURATION ===
+# =========================
+# CONFIGURATION
+# =========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_TXT = os.path.join(BASE_DIR, "weathernow_cached.txt")
 
 GEOJSON_PATH = os.path.join(BASE_DIR, "greece.geojson")
 ALT_VRT_PATH = os.path.join(BASE_DIR, "GRC_alt.vrt")
@@ -60,14 +61,11 @@ RAIN_URL = os.environ.get("CURRENTWEATHER_URL")
 if not RAIN_URL:
     raise SystemExit("❌ CURRENTWEATHER_URL not set")
 
+CACHE_TXT = os.path.join(BASE_DIR, "weathernow_cached.txt")
+
 FTP_HOST = os.environ.get("FTP_HOST")
 FTP_USER = os.environ.get("FTP_USER")
 FTP_PASS = os.environ.get("FTP_PASS")
-
-if not FTP_HOST or not FTP_USER or not FTP_PASS:
-    raise SystemExit("❌ FTP_HOST / FTP_USER / FTP_PASS not set")
-
-
 if not FTP_HOST or not FTP_USER or not FTP_PASS:
     raise SystemExit("❌ FTP_HOST / FTP_USER / FTP_PASS not set")
 
@@ -123,7 +121,9 @@ MIN_NBR = 8
 USE_DISTANCE_WEIGHTS = True
 
 
-# === FTP HELPERS ===
+# =========================
+# FTP HELPERS
+# =========================
 def upload_to_ftp(local_file: str) -> None:
     remote_filename = os.path.basename(local_file)
 
@@ -193,7 +193,9 @@ def prune_remote_pngs(keep: int = 40, prefix: str = PREFIX, latest_name: str = L
             pass
 
 
-# === FETCH HELPERS ===
+# =========================
+# FETCH HELPERS
+# =========================
 def robust_fetch_text(url: str, timeout: int = 60, tries: int = 6):
     """
     Returns: (text, source)
@@ -251,7 +253,9 @@ def robust_fetch_text(url: str, timeout: int = 60, tries: int = 6):
     raise RuntimeError(f"Failed to fetch {url}") from last_err
 
 
-# === ALTITUDE SAMPLING ===
+# =========================
+# ALTITUDE SAMPLING
+# =========================
 def sample_altitude_m(vrt_path: str, lons, lats) -> np.ndarray:
     lons = np.asarray(lons, dtype=float)
     lats = np.asarray(lats, dtype=float)
@@ -289,7 +293,9 @@ def fit_global_lapse_rate(tnow_c: np.ndarray, alt_m: np.ndarray) -> float:
     return float(b)
 
 
-# === IDW (meters) ===
+# =========================
+# IDW (meters)
+# =========================
 def idw_optimized(x, y, z, xi, yi, power=2, max_distance=120_000, k=8) -> np.ndarray:
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -330,7 +336,9 @@ def idw_optimized(x, y, z, xi, yi, power=2, max_distance=120_000, k=8) -> np.nda
     return zi.reshape(xi.shape)
 
 
-# === Minimum-distance thinning for snowflakes (meters) ===
+# =========================
+# Minimum-distance thinning for snowflakes (meters)
+# =========================
 def downsample_mask_points(grid_x, grid_y, mask, max_points=5000, min_sep=4500, seed=123):
     ys, xs = np.where(mask)
     if len(xs) == 0:
@@ -361,7 +369,9 @@ def downsample_mask_points(grid_x, grid_y, mask, max_points=5000, min_sep=4500, 
     return kept[:, 0], kept[:, 1]
 
 
-# === Local regression temperature field (EGSA distances; altitude sampled via lon/lat) ===
+# =========================
+# Local regression temperature field
+# =========================
 def build_temperature_grid_local_lr(
     grid_x_m, grid_y_m,
     station_x_m, station_y_m,
@@ -491,6 +501,9 @@ def build_temperature_grid_local_lr(
     return temp_fine, b_fine, a_fine, b_global
 
 
+# =========================
+# MAIN
+# =========================
 def main():
     if not os.path.exists(GEOJSON_PATH):
         print(f"❌ Missing: {GEOJSON_PATH}")
@@ -509,7 +522,7 @@ def main():
     x_min, x_max = float(np.min(corners_x)), float(np.max(corners_x))
     y_min, y_max = float(np.min(corners_y)), float(np.max(corners_y))
 
-    # Fetch data (with explicit source reporting)
+    # Fetch data
     try:
         text, source = robust_fetch_text(RAIN_URL, timeout=60, tries=6)
         print("source:", source)
@@ -545,7 +558,6 @@ def main():
     athens_now = datetime.now(ZoneInfo("Europe/Athens"))
     time_threshold = athens_now - timedelta(minutes=45)
 
-    # DEBUG: prove what the script thinks "now" and the file max/min are
     print("athens_now:", athens_now)
     print("max file datetime:", data["Datetime"].max())
     print("min file datetime:", data["Datetime"].min())
@@ -670,7 +682,7 @@ def main():
     output_file = os.path.join(output_dir, f"{PREFIX}{timestamp}.png")
     latest_output = os.path.join(output_dir, LATEST_NAME)
 
-    # === PLOTTING (geometry in EPSG:2100, ticks shown as lon/lat degrees) ===
+    # Plot (geometry in EPSG:2100, ticks shown as lon/lat degrees)
     fig, ax = plt.subplots(figsize=(10, 10), dpi=300)
     masked_array = ma.masked_invalid(masked_intensity)
 
@@ -689,7 +701,7 @@ def main():
     ax.set_ylim(y_min, y_max)
     ax.set_aspect("equal", adjustable="box")
 
-    # --- Show lon/lat degrees on axes (labels only; map stays EGSA) ---
+    # Show lon/lat degrees on axes (labels only; map stays EGSA)
     y_ref_for_lon = y_min
     x_ref_for_lat = x_min
 
