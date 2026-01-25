@@ -732,7 +732,7 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
             frost_cells = np.sum(final_mask & (out <= 0.0))
             frost_pct = 100.0 * float(frost_cells) / denom
             if round(frost_pct, 2) > 0.0:
-                frost_text = f"«{frost_pct:.1f}% της επικράτειας\nμε παγετό (εκτ.)»"
+                frost_text = f"{frost_pct:.1f}% της επικράτειας\nμε παγετό (εκτ.)"
     except Exception:
         frost_text = ""
 
