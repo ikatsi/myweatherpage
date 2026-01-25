@@ -280,31 +280,24 @@ def fetch_text(url: str) -> str:
         if not payload:
             return False
         head = payload.lstrip().lower()
-
         if head.startswith("<!doctype") or head.startswith("<html") or "<html" in head[:500]:
             return False
-
         lines = [ln for ln in payload.splitlines() if ln.strip()][:15]
         if not lines:
             return False
-
         joined = "\n".join(lines).lower()
         if "datetime" not in joined:
             return False
-
         if not any("\t" in ln for ln in lines):
             return False
-
         return True
 
     for i in range(MAX_RETRIES):
         try:
             r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-
             ct = r.headers.get("Content-Type", "")
             print("ℹ️ HTTP:", r.status_code, "| Content-Type:", ct)
 
-            # If server rejects, print a short preview of the response body to understand what it wants
             if r.status_code >= 400:
                 try:
                     preview = (r.text or "")[:300].replace("\n", "\\n")
@@ -315,10 +308,32 @@ def fetch_text(url: str) -> str:
 
             r.raise_for_status()
 
-            if r.encoding is None:
-                r.encoding = "utf-8"
+            raw = r.content  # bytes
+            text = None
 
-            text = r.text
+            # 1) Correct for your feed: UTF-8 (with BOM safety)
+            for enc in ("utf-8-sig", "utf-8"):
+                try:
+                    text = raw.decode(enc)
+                    break
+                except Exception:
+                    pass
+
+            # 2) Fallbacks (Greek legacy encodings)
+            if text is None:
+                for enc in ("cp1253", "iso-8859-7", "latin-1"):
+                    try:
+                        text = raw.decode(enc)
+                        break
+                    except Exception:
+                        pass
+
+            if text is None:
+                # last resort: don't crash, but you'll see replacement chars
+                text = raw.decode("utf-8", errors="replace")
+                
+            if "Î" in text or "Ã" in text:
+                print("⚠️ Suspected mojibake in decoded text (check encoding/headers).")
 
             if not _looks_like_tsv(text):
                 preview = text[:200].replace("\n", "\\n")
