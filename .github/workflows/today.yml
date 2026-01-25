@@ -21,7 +21,7 @@ jobs:
       FTP_USER:           ${{ secrets.FTP_USER }}
       FTP_PASS:           ${{ secrets.FTP_PASS }}
       GEOJSON_PASS:       ${{ secrets.GEOJSON_PASS }}
-      BRAND_NAME: ${{ secrets.BRAND_NAME }}
+      BRAND_NAME:         ${{ secrets.BRAND_NAME }}
 
     steps:
       - name: Debug context
@@ -82,6 +82,26 @@ jobs:
 
           test -f GRC_alt.vrt || { echo "GRC_alt.vrt missing after unzip"; ls -la; exit 1; }
           ls -l GRC_alt.vrt
+
+      - name: Debug CURRENTWEATHER_URL response headers
+        run: |
+          python - <<'PY'
+          import os, requests
+          url = os.environ.get("CURRENTWEATHER_URL","").strip()
+          print("URL set:", bool(url))
+          if not url:
+            raise SystemExit("CURRENTWEATHER_URL is empty")
+          r = requests.get(
+            url,
+            headers={"Accept":"text/plain, text/*;q=0.9, */*;q=0.8", "User-Agent":"Mozilla/5.0"},
+            timeout=20,
+          )
+          print("Status:", r.status_code)
+          print("Content-Type:", r.headers.get("Content-Type"))
+          txt = (r.text or "")
+          print("First 200 chars:", txt[:200].replace("\n"," "))
+          r.raise_for_status()
+          PY
 
       - name: Run today.py
         run: |
