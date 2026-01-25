@@ -381,7 +381,7 @@ def pick_station_label_column(df: pd.DataFrame) -> str:
     return "webcode"
 
 
-def add_top5_box_greece(ax, tt0: pd.DataFrame) -> None:
+def add_top5_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
     """
     Transparent top-right info + map markers (1..5).
     - Cold 5: blue numbers
@@ -421,6 +421,10 @@ def add_top5_box_greece(ax, tt0: pd.DataFrame) -> None:
         return "\n".join(lines)
 
     box_text = fmt_block(cold5, "Ψυχρότερες 5 περιοχές") + "\n\n" + fmt_block(hot5, "Θερμότερες 5 περιοχές")
+
+    # ---- add frost line (only when provided)
+    if frost_text:
+        box_text = box_text + "\n\n" + frost_text
 
     # Transparent box (no background), keep readability with white stroke
     ax.text(
@@ -671,6 +675,24 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     out = np.full(grid_x.shape, np.nan, dtype=float)
     out[final_mask] = t_grid[final_mask]
 
+    # =========================
+    # NEW: % of territory (modelled) with air frost (T <= 0°C)
+    # Shown ONLY if the rounded-to-2-decimals value is > 0.00%
+    # Text is forced to NOT be a single line (newline inserted).
+    # =========================
+    frost_text = ""
+    try:
+        denom = float(np.sum(final_mask))
+        if denom > 0:
+            frost_cells = np.sum(final_mask & np.isfinite(out) & (out <= 0.0))
+            frost_pct = 100.0 * float(frost_cells) / denom
+            frost_pct_2 = round(frost_pct, 2)
+            if frost_pct_2 > 0.0:
+                frost_pct_1 = round(frost_pct, 1)
+                frost_text = f"«{frost_pct_1:.1f}% της επικράτειας\nμε παγετό (εκτ.)»"
+    except Exception:
+        frost_text = ""
+
     fig, ax = plt.subplots(figsize=(12, 8))
     img = ax.imshow(
         ma.masked_invalid(out),
@@ -689,7 +711,7 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     ax.set_xlabel("Γεωγρ. μήκος", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
 
-    add_top5_box_greece(ax, tt0)
+    add_top5_box_greece(ax, tt0, frost_text=frost_text)
 
     ax.text(
         0.01, 0.01, stamp_text(athens_now),
@@ -904,7 +926,7 @@ def make_tnow_attica_egsa(df, greece_gdf_wgs, dem_path, athens_now):
     ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
 
     add_contours(ax, grid_x_m, grid_y_m, out)
-    
+
     # slimmer colorbar so the map stays large (Attica figure is square)
     cbar = fig.colorbar(img, ax=ax, orientation="vertical", extend="both",
                         fraction=0.035, pad=0.02)
@@ -1076,7 +1098,7 @@ def make_tnow_crete_egsa(df, greece_gdf_wgs, dem_path, athens_now):
     ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
 
     add_contours(ax, grid_x_m, grid_y_m, out)
-    
+
     # slimmer colorbar so the map stays large (Attica figure is square)
     cbar = fig.colorbar(img, ax=ax, orientation="vertical", extend="both",
                         fraction=0.035, pad=0.02)
