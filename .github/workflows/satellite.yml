@@ -25,6 +25,7 @@ jobs:
 
       - name: Run satellite script
         env:
+          GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
@@ -32,13 +33,7 @@ jobs:
           set -e
           python satellite.py
           echo "---- Listing outputs ----"
-          ls -lah
-          if [ -d "rainintensitymaps" ]; then
-            ls -lah rainintensitymaps
-          else
-            echo "rainintensitymaps/ not found"
-            exit 1
-          fi
+          ls -lah rainintensitymaps
 
       - name: Upload PNGs as artifact
         uses: actions/upload-artifact@v4
