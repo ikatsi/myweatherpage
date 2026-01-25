@@ -210,18 +210,21 @@ LAPSE_ALT_RANGE_MIN_M = 200
 # =========================
 def build_shared_temp_cmap_norm():
     anchors = [
-        (-25.0, "#1f4e99"),
-        (-15.0, "#2f78c5"),
-        (-8.0,  "#4fa8dd"),
-        (-3.0,  "#8ad2ff"),
-        (0.0,   "#ffffff"),
-        (5.0,   "#fff3cf"),
-        (12.0,  "#ffe08a"),
-        (18.0,  "#ffc85a"),
-        (25.0,  "#ff9f2a"),
-        (32.0,  "#f36b2c"),
-        (38.0,  "#d9413a"),
-        (45.0,  "#6d2aa6"),
+        (-25.0, "#0b1d5c"),  # deep cold navy
+        (-18.0, "#123b8a"),  # dark blue
+        (-12.0, "#1f63c6"),  # blue
+        (-6.0,  "#2f8fe6"),  # lighter blue
+        (-2.0,  "#44b6ff"),  # icy blue
+        (0.0,   "#2b7bff"),  # 0°C = BLUE (important!)
+        (3.0,   "#2fb8d6"),  # blue-cyan
+        (7.0,   "#2fc4a0"),  # cyan-green
+        (12.0,  "#34c759"),  # green
+        (18.0,  "#b7dd2a"),  # yellow-green
+        (24.0,  "#ffe11a"),  # yellow
+        (30.0,  "#ff9a1a"),  # orange
+        (35.0,  "#ff4d1a"),  # red-orange
+        (40.0,  "#d1166f"),  # hot magenta
+        (45.0,  "#6a00a8"),  # purple (extreme heat)
     ]
     vals = np.array([v for v, _ in anchors], dtype=float)
     cols = [c for _, c in anchors]
@@ -230,7 +233,6 @@ def build_shared_temp_cmap_norm():
     cmap = LinearSegmentedColormap.from_list("t_shared", list(zip(t, cols)), N=256)
     norm = Normalize(vmin=TEMP_VMIN, vmax=TEMP_VMAX, clip=True)
     return cmap, norm
-
 
 TEMP_CMAP, TEMP_NORM = build_shared_temp_cmap_norm()
 
