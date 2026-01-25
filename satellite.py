@@ -1,40 +1,43 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# rain_intensity_satellite_greece.py
+# satellite.py
 #
 # Satellite precipitation (IMERG) map over the FULL bbox (land + sea),
 # with the SAME look as your station-based rain_intensity_ map:
 # - same bbox, same GRID_N, same legend steps, same labels, same colormap
 # - only the data source changes (NASA IMERG via Earthdata GIS ArcGIS ImageServer)
 #
-# Source: GESDISC/GPM_3IMERGHHE ImageServer (IMERG Early half-hourly precip rate, EPSG:4326)
-# https://gis.earthdata.nasa.gov/image/rest/services/GESDISC/GPM_3IMERGHHE/ImageServer
+# Also:
+# - decrypts greece.geojson.enc -> greece.geojson using GEOJSON_PASS (same pattern as your other scripts)
+# - uses FTP_HOST/FTP_USER/FTP_PASS env secrets for optional upload + remote prune
 #
-# Notes:
-# - We fetch the latest available StdTime via /query, then export that slice via /exportImage as TIFF.
-# - Values are float32, mm/hr (per the dataset/product conventions).
+# Source (ArcGIS ImageServer):
+#   https://gis.earthdata.nasa.gov/image/rest/services/GESDISC/GPM_3IMERGHHE/ImageServer
 #
-# Env:
-#   Optional FTP:
-#     FTP_HOST, FTP_USER, FTP_PASS
-#
-# Outputs (local):
+# Outputs:
 #   rainintensitymaps/
 #     rain_intensity_sat_YYYY-MM-DD-HH-MM.png
 #     latest_sat.png
+#
+# Required secrets/env in GitHub Actions:
+#   GEOJSON_PASS  (to decrypt greece.geojson.enc)
+# Optional for upload:
+#   FTP_HOST, FTP_USER, FTP_PASS
 
 import os
 import re
 import time
 import random
 import shutil
-from datetime import datetime, timedelta
+import subprocess
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from io import BytesIO
 
 import numpy as np
 import numpy.ma as ma
 import geopandas as gpd
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -51,8 +54,10 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 # =========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Use the SAME Greece outline you already have
+# Greece outline: encrypted in repo, decrypted at runtime
 GEOJSON_PATH = os.path.join(BASE_DIR, "greece.geojson")
+GEOJSON_ENC = os.path.join(BASE_DIR, "greece.geojson.enc")
+GEOJSON_PASS = os.environ.get("GEOJSON_PASS", "").strip()
 
 # Map grid/extent (EXACTLY as in your code)
 GRID_N = 300
@@ -60,31 +65,51 @@ GRID_LON_MIN, GRID_LON_MAX = 19.0, 30.0
 GRID_LAT_MIN, GRID_LAT_MAX = 34.5, 42.5
 
 # Colormap and bounds (EXACTLY as in your code)
-cmap = ListedColormap(["#deebf7", "#9ecae1", "#4292c6", "#08519c"])
-cmap.set_under("#ffffff")
-cmap.set_over("#08306b")
-cmap.set_bad("#ffffff")
-bounds = [0.1, 2, 6, 36, 100]
-norm = BoundaryNorm(boundaries=bounds, ncolors=cmap.N)
+CMAP = ListedColormap(["#deebf7", "#9ecae1", "#4292c6", "#08519c"])
+CMAP.set_under("#ffffff")
+CMAP.set_over("#08306b")
+CMAP.set_bad("#ffffff")
+BOUNDS = [0.1, 2, 6, 36, 100]
+NORM = BoundaryNorm(boundaries=BOUNDS, ncolors=CMAP.N)
 
 # Output naming (separate product for overlay)
 OUTPUT_DIR = os.path.join(BASE_DIR, "rainintensitymaps")
 PREFIX = "rain_intensity_sat_"
 LATEST_NAME = "latest_sat.png"
-
-# Remote prune policy (optional)
 KEEP_REMOTE = 40
 
-# ImageServer (IMERG Early)
+# IMERG ImageServer (Early Run half-hourly)
 IMERG_IMAGESERVER = "https://gis.earthdata.nasa.gov/image/rest/services/GESDISC/GPM_3IMERGHHE/ImageServer"
 
-# If you prefer "Late" or "Final" instead, you can swap to:
-#   GESDISC/GPM_3IMERGHH   (Final)
-# and adjust the URL accordingly.
-
-# Fetch robustness
+# Robustness
 TIMEOUT = 60
 TRIES = 6
+
+
+# =========================
+# Decryption helpers
+# =========================
+def ensure_geojson():
+    """
+    Decrypt greece.geojson.enc -> greece.geojson (repo root) using GEOJSON_PASS.
+    """
+    if os.path.exists(GEOJSON_PATH):
+        return
+    if not os.path.exists(GEOJSON_ENC):
+        return
+    if not GEOJSON_PASS:
+        raise SystemExit("GeoJSON missing and GEOJSON_PASS not set to decrypt greece.geojson.enc")
+
+    try:
+        subprocess.check_call([
+            "openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2",
+            "-in", GEOJSON_ENC, "-out", GEOJSON_PATH, "-pass", "pass:" + GEOJSON_PASS
+        ])
+        print("🔓 Decrypted greece.geojson.enc -> greece.geojson")
+    except FileNotFoundError:
+        raise SystemExit("OpenSSL not found. Install it or decrypt greece.geojson.enc in a prior CI step.")
+    except subprocess.CalledProcessError as e:
+        raise SystemExit("OpenSSL decryption failed for greece.geojson.enc: %s" % e)
 
 
 # =========================
@@ -120,6 +145,12 @@ def upload_to_ftp(local_file: str) -> None:
             pass
 
 def prune_remote_pngs(keep: int = 40, prefix: str = PREFIX, latest_name: str = LATEST_NAME) -> None:
+    """
+    Remote prune:
+      - Keep latest_sat.png
+      - Keep newest `keep` files matching rain_intensity_sat_YYYY-MM-DD-HH-MM.png
+      - Delete older ones
+    """
     if not ftp_enabled():
         print("ℹ️ FTP disabled (missing env). Skipping remote prune.")
         return
@@ -132,7 +163,12 @@ def prune_remote_pngs(keep: int = 40, prefix: str = PREFIX, latest_name: str = L
     ftps.prot_p()
 
     try:
-        names = ftps.nlst()
+        try:
+            names = ftps.nlst()
+        except Exception as e:
+            print("⚠️ Could not list remote directory:", e)
+            return
+
         basenames = [os.path.basename(n) for n in names if n]
         timestamped = [n for n in basenames if pat.match(n) and n != latest_name]
 
@@ -145,7 +181,8 @@ def prune_remote_pngs(keep: int = 40, prefix: str = PREFIX, latest_name: str = L
             print(f"ℹ️ {len(timestamped)} timestamped files ≤ keep={keep}. Nothing to delete.")
             return
 
-        for fname in timestamped[:-keep]:
+        to_delete = timestamped[:-keep]
+        for fname in to_delete:
             try:
                 ftps.delete(fname)
                 print("🧹 Deleted old remote file:", fname)
@@ -209,7 +246,6 @@ def get_latest_stdtime_ms() -> int:
     attrs = feats[0].get("attributes", {})
     stdtime = attrs.get("StdTime")
     if stdtime is None:
-        # sometimes the JSON uses lowercase; be defensive
         stdtime = attrs.get("stdtime")
     if stdtime is None:
         raise RuntimeError("Latest feature did not contain StdTime.")
@@ -225,8 +261,6 @@ def export_imerg_tiff(bbox, size_wh, time_ms: int) -> bytes:
     xmin, ymin, xmax, ymax = bbox
     w, h = size_wh
 
-    # ArcGIS expects bbox as "xmin,ymin,xmax,ymax"
-    # time can be a single instant (milliseconds)
     params = {
         "bbox": f"{xmin},{ymin},{xmax},{ymax}",
         "bboxSR": 4326,
@@ -235,17 +269,14 @@ def export_imerg_tiff(bbox, size_wh, time_ms: int) -> bytes:
         "format": "tiff",
         "time": str(time_ms),
         "f": "image",
-        # IMPORTANT: do NOT apply server-side color remaps.
-        # No renderingRule parameter means raw pixel values.
     }
     r = robust_get(ex_url, params=params, timeout=TIMEOUT, tries=TRIES, stream=True)
     return r.content
 
 
-# =========================
-# Main
-# =========================
 def main():
+    ensure_geojson()
+
     if not os.path.exists(GEOJSON_PATH):
         print(f"❌ Missing: {GEOJSON_PATH}")
         return
@@ -277,8 +308,8 @@ def main():
         if nodata is not None:
             arr = np.where(arr == nodata, np.nan, arr)
 
-    # ArcGIS export commonly returns top-to-bottom rows; your plotting uses origin="lower".
-    # We flip vertically to align geographic orientation.
+    # ArcGIS export often returns top-to-bottom rows; your plotting uses origin="lower".
+    # Flip vertically to align geography.
     arr = np.flipud(arr)
 
     # Mask invalids for plotting
@@ -296,8 +327,8 @@ def main():
         masked_array,
         extent=(GRID_LON_MIN, GRID_LON_MAX, GRID_LAT_MIN, GRID_LAT_MAX),
         origin="lower",
-        cmap=cmap,
-        norm=norm,
+        cmap=CMAP,
+        norm=NORM,
         alpha=0.7
     )
 
@@ -305,7 +336,6 @@ def main():
 
     # Contour borders only (same levels)
     contour_levels = [0.1, 2, 6, 36, 100]
-    # Build matching grid for contours (same as your code structure)
     grid_x, grid_y = np.meshgrid(
         np.linspace(GRID_LON_MIN, GRID_LON_MAX, GRID_N),
         np.linspace(GRID_LAT_MIN, GRID_LAT_MAX, GRID_N)
@@ -315,7 +345,7 @@ def main():
     # Colorbar (same)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="3%", pad=0.1)
-    cbar = plt.colorbar(img, cax=cax, boundaries=bounds, extend="both")
+    cbar = plt.colorbar(img, cax=cax, boundaries=BOUNDS, extend="both")
     cbar.set_ticks([2, 6, 36, 100])
     cbar.set_ticklabels(["2", "6", "36", "100"])
     cbar.set_label("Ραγδαιότητα υετού (mm/h)", fontsize=12)
@@ -326,7 +356,7 @@ def main():
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
-    # Footer (keep the same style; keep wording aligned with your existing maps)
+    # Footer (same style)
     timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M %Z")
     left_text = f"Δημιουργήθηκε για το e-kairos.gr\n{timestamp_text}"
     right_text = f"v_sat-imerg\nStdTime: {latest_utc.strftime('%Y-%m-%d %H:%M UTC')}"
