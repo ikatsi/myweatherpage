@@ -3,8 +3,6 @@ name: Build Cyprus rain intensity maps
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/15 * * * *"
 
 concurrency:
   group: rain-cyprus-${{ github.workflow }}-${{ github.ref }}
