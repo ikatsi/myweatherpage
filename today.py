@@ -73,6 +73,7 @@ FTP_HOST = os.environ.get("FTP_HOST", "").strip()
 FTP_USER = os.environ.get("FTP_USER", "").strip()
 FTP_PASS = os.environ.get("FTP_PASS", "").strip()
 GEOJSON_PASS = os.environ.get("GEOJSON_PASS", "").strip()
+BRAND_NAME = os.environ.get("BRAND_NAME", "").strip()
 
 GRID_LON_MIN, GRID_LON_MAX = 19.0, 30.0
 GRID_LAT_MIN, GRID_LAT_MAX = 34.5, 42.5
@@ -444,8 +445,11 @@ def estimate_local_lapse_rates(st_lons, st_lats, st_temp, st_elev,
 
 def stamp_text(athens_now: datetime) -> str:
     ts = athens_now.strftime("%Y-%m-%d %H:%M %Z")
-    return "Δημιουργήθηκε για το e-kairos.gr\n" + ts
 
+    if not BRAND_NAME:
+        raise SystemExit("BRAND_NAME is not set (required for stamp text).")
+
+    return f"Δημιουργήθηκε για το {BRAND_NAME}\n" + ts
 
 def add_top5_box(ax, title: str, lines: list, x0=0.99, y0=0.98):
     header = ax.text(
