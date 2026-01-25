@@ -94,7 +94,13 @@ CR_N = 300
 
 
 # Fetch/retry
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "text/plain, text/*;q=0.9, */*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.8,el;q=0.7",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
 MAX_RETRIES = 5
 DELAY = 10
 TIMEOUT = 20
@@ -275,21 +281,17 @@ def fetch_text(url: str) -> str:
             return False
         head = payload.lstrip().lower()
 
-        # obvious HTML / error pages
         if head.startswith("<!doctype") or head.startswith("<html") or "<html" in head[:500]:
             return False
 
-        # require that at least one of the first few non-empty lines contains tabs
         lines = [ln for ln in payload.splitlines() if ln.strip()][:15]
         if not lines:
             return False
 
-        # many of your feeds have a header with Datetime / Latitude / Longitude
         joined = "\n".join(lines).lower()
         if "datetime" not in joined:
             return False
 
-        # must look tab-delimited
         if not any("\t" in ln for ln in lines):
             return False
 
@@ -298,13 +300,30 @@ def fetch_text(url: str) -> str:
     for i in range(MAX_RETRIES):
         try:
             r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+
+            ct = r.headers.get("Content-Type", "")
+            print("ℹ️ HTTP:", r.status_code, "| Content-Type:", ct)
+
+            # If server rejects, print a short preview of the response body to understand what it wants
+            if r.status_code >= 400:
+                try:
+                    preview = (r.text or "")[:300].replace("\n", "\\n")
+                except Exception:
+                    preview = ""
+                if preview:
+                    print("ℹ️ Body preview:", preview)
+
             r.raise_for_status()
-            r.encoding = "utf-8"
+
+            if r.encoding is None:
+                r.encoding = "utf-8"
+
             text = r.text
 
             if not _looks_like_tsv(text):
+                preview = text[:200].replace("\n", "\\n")
                 raise requests.exceptions.RequestException(
-                    "Response did not look like tab-delimited weather data (possible HTML/partial response)."
+                    "Response did not look like tab-delimited weather data. Preview: " + preview
                 )
 
             return text
