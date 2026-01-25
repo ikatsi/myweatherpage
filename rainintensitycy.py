@@ -15,6 +15,7 @@ import shutil
 import time
 import random
 import subprocess
+import socket
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from io import StringIO
@@ -61,17 +62,14 @@ if not os.path.exists(GEOJSON_PATH):
     )
 
 # DEM (Copernicus 90m DSM GeoTIFF)
-VECTORS_DIR = BASE_DIR
 ALT_TIF_PATH = os.path.join(BASE_DIR, "cyprus_dsm_90m.tif")
 
-# Station feed
 # Station feed
 RAIN_URL = os.environ.get("CURRENTWEATHER_URL")
 if not RAIN_URL:
     raise SystemExit("❌ CURRENTWEATHER_URL not set")
 
 CACHE_TXT = os.path.join(BASE_DIR, "weathernow_cyprus_cached.txt")
-
 
 # Cyprus bbox in lon/lat (for station filtering only)
 LON_MIN, LON_MAX = 32.0, 34.9
@@ -161,7 +159,6 @@ def robust_fetch_text(url: str, timeout: int = 60, tries: int = 6):
         with open(url, "r", encoding="utf-8", errors="replace") as f:
             return f.read(), "localfile"
 
-    
     last_err = None
     session = requests.Session()
 
@@ -172,7 +169,6 @@ def robust_fetch_text(url: str, timeout: int = 60, tries: int = 6):
             text = r.text or ""
             head = text[:300].replace("\n", "\\n")
 
-            # Accept either "Datetime" header or a tab-separated first line that starts with it
             first_line = text.splitlines()[0].strip() if text.strip() else ""
             looks_like_tsv = ("\t" in first_line) and (len(first_line) >= 10)
 
@@ -183,7 +179,9 @@ def robust_fetch_text(url: str, timeout: int = 60, tries: int = 6):
                 raise RuntimeError(f"Empty response body. First 300 chars: {head}")
 
             if ("Datetime" not in text) and (not looks_like_tsv):
-                raise RuntimeError(f"Response is not expected TSV. First line: {first_line[:200]} | First 300 chars: {head}")
+                raise RuntimeError(
+                    f"Response is not expected TSV. First line: {first_line[:200]} | First 300 chars: {head}"
+                )
 
             return text, "network"
 
@@ -254,9 +252,9 @@ def print_latest_rows(df: pd.DataFrame, n: int = 8) -> None:
 
 
 # =========================
-# FTP
+# FTP (robust on GitHub runners)
 # =========================
-def ftp_login_ftps() -> FTP_TLS:
+def ftp_login_ftps(timeout: int = 60) -> FTP_TLS:
     """
     Explicit FTPS (AUTH TLS) on port 21.
     """
@@ -264,7 +262,7 @@ def ftp_login_ftps() -> FTP_TLS:
         raise RuntimeError("FTP_PASS is empty. Set environment variable FTP_PASS.")
 
     ftps = FTP_TLS()
-    ftps.connect(FTP_HOST, FTP_PORT, timeout=30)
+    ftps.connect(FTP_HOST, FTP_PORT, timeout=timeout)
 
     # Explicit TLS upgrade before login
     ftps.auth()
@@ -273,64 +271,97 @@ def ftp_login_ftps() -> FTP_TLS:
     # Protect data channel
     ftps.prot_p()
     ftps.set_pasv(True)
+
+    try:
+        ftps.sock.settimeout(timeout)
+    except Exception:
+        pass
+
     return ftps
 
 
-def upload_to_ftp(local_file: str):
+def _ftp_retryable(fn, tries: int = 5, base_sleep: float = 2.0, max_sleep: float = 20.0):
+    last = None
+    for attempt in range(1, tries + 1):
+        try:
+            return fn()
+        except (TimeoutError, socket.timeout, OSError, EOFError) as e:
+            last = e
+            sleep_s = min(base_sleep * (2 ** (attempt - 1)), max_sleep) + random.random()
+            print(f"⚠️ FTP transient error (attempt {attempt}/{tries}): {e} | sleeping {sleep_s:.1f}s")
+            time.sleep(sleep_s)
+        except error_perm as e:
+            raise RuntimeError(f"FTP permission/auth error: {e}") from e
+    raise RuntimeError(f"FTP failed after {tries} attempts: {last}") from last
+
+
+def upload_to_ftp(local_file: str, timeout: int = 90, tries: int = 5):
     remote_filename = os.path.basename(local_file)
-    ftps = None
-    try:
-        ftps = ftp_login_ftps()
-        with open(local_file, "rb") as f:
-            ftps.storbinary("STOR " + remote_filename, f)
-        print("📤 Uploaded:", remote_filename)
-    except error_perm as e:
-        raise RuntimeError(f"FTP login/upload failed: {e}") from e
-    finally:
-        if ftps is not None:
-            try:
-                ftps.quit()
-            except Exception:
-                pass
+
+    def _do():
+        ftps = None
+        try:
+            ftps = ftp_login_ftps(timeout=timeout)
+            with open(local_file, "rb") as f:
+                ftps.storbinary("STOR " + remote_filename, f, blocksize=1024 * 64)
+            print("📤 Uploaded:", remote_filename)
+        finally:
+            if ftps is not None:
+                try:
+                    ftps.quit()
+                except Exception:
+                    pass
+
+    _ftp_retryable(_do, tries=tries)
 
 
-def prune_remote_cyprus_pngs(keep: int = 144):
+def prune_remote_cyprus_pngs(keep: int = 144, timeout: int = 90, tries: int = 4):
     """
     Delete old timestamped PNGs:
       cyprusrainintensityYYYY-MM-DD-HH-MM.png
     Keep latest `keep`.
+    Best-effort: prune failures must NOT kill the run.
     """
-    ftps = None
+    pat = re.compile(r"^cyprusrainintensity\d{4}-\d{2}-\d{2}-\d{2}-\d{2}\.png$")
+
+    def _do():
+        ftps = None
+        try:
+            ftps = ftp_login_ftps(timeout=timeout)
+            names = ftps.nlst()
+            timestamped = [os.path.basename(n) for n in names if pat.match(os.path.basename(n))]
+
+            if not timestamped:
+                print("ℹ️ No timestamped cyprusrainintensity PNGs found remotely.")
+                return
+
+            timestamped.sort()
+            if len(timestamped) <= keep:
+                print(f"ℹ️ {len(timestamped)} timestamped files ≤ keep={keep}. Nothing to delete.")
+                return
+
+            to_delete = timestamped[:-keep]
+            print(f"🧹 Pruning {len(to_delete)} old Cyprus PNG(s) (keeping {keep}).")
+
+            for fname in to_delete:
+                try:
+                    ftps.delete(fname)
+                    print("🧹 Deleted:", fname)
+                except (TimeoutError, socket.timeout, OSError, EOFError) as e:
+                    print(f"⚠️ Delete failed for {fname}: {e}")
+                except Exception as e:
+                    print(f"⚠️ Delete failed for {fname}: {e}")
+        finally:
+            if ftps is not None:
+                try:
+                    ftps.quit()
+                except Exception:
+                    pass
+
     try:
-        ftps = ftp_login_ftps()
-        names = ftps.nlst()
-
-        pat = re.compile(r"^cyprusrainintensity\d{4}-\d{2}-\d{2}-\d{2}-\d{2}\.png$")
-        timestamped = [os.path.basename(n) for n in names if pat.match(os.path.basename(n))]
-
-        if not timestamped:
-            print("ℹ️ No timestamped cyprusrainintensity PNGs found remotely.")
-            return
-
-        timestamped.sort()
-        if len(timestamped) <= keep:
-            print(f"ℹ️ {len(timestamped)} timestamped files ≤ keep={keep}. Nothing to delete.")
-            return
-
-        for fname in timestamped[:-keep]:
-            try:
-                ftps.delete(fname)
-                print("🧹 Deleted old remote file:", fname)
-            except Exception as e:
-                print(f"⚠️ Failed to delete {fname}: {e}")
-    except error_perm as e:
-        raise RuntimeError(f"FTP prune failed: {e}") from e
-    finally:
-        if ftps is not None:
-            try:
-                ftps.quit()
-            except Exception:
-                pass
+        _ftp_retryable(_do, tries=tries)
+    except Exception as e:
+        print(f"⚠️ Prune step failed (non-fatal): {e}")
 
 
 # =========================
@@ -403,7 +434,8 @@ def idw_optimized_m(x, y, z, xi, yi, power=2, max_distance=40000.0, k=8):
     zi = np.full(xi.size, np.nan, dtype=float)
     num = np.sum(weights[valid] * zvals[valid], axis=1)
     den = np.sum(weights[valid], axis=1)
-    zi[valid] = num / den
+    with np.errstate(divide="ignore", invalid="ignore"):
+        zi[valid] = np.where(den > 0, num / den, np.nan)
 
     return zi.reshape(xi.shape)
 
@@ -592,7 +624,6 @@ def main():
     data = pd.read_csv(StringIO(text), sep="\t", engine="python")
     data.columns = [str(c).replace("\ufeff", "").strip() for c in data.columns]
 
-
     # --- required columns ---
     needed = ["Latitude", "Longitude", "RainIntensity", "Datetime"]
     missing = [c for c in needed if c not in data.columns]
@@ -603,12 +634,12 @@ def main():
     data["Latitude"] = pd.to_numeric(data["Latitude"], errors="coerce")
     data["Longitude"] = pd.to_numeric(data["Longitude"], errors="coerce")
     data["RainIntensity"] = pd.to_numeric(data["RainIntensity"], errors="coerce")
+
     # Parse datetimes as naive first, then localize to Athens (same as Attica)
     data["Datetime"] = pd.to_datetime(data["Datetime"], errors="coerce")
     data["Datetime"] = data["Datetime"].dt.tz_localize(
-    "Europe/Athens", ambiguous="NaT", nonexistent="NaT"
+        "Europe/Athens", ambiguous="NaT", nonexistent="NaT"
     )
-
 
     if "TNow" in data.columns:
         data["TNow"] = pd.to_numeric(data["TNow"], errors="coerce")
@@ -640,12 +671,12 @@ def main():
     # Filter only recent stations (Athens time, tz-aware like Attica)
     athens_now = datetime.now(ZoneInfo("Europe/Athens"))
     time_threshold = athens_now - timedelta(minutes=TIME_WINDOW_MIN)
-    
+
     print("athens_now:", athens_now)
     print("max file datetime:", data["Datetime"].max())
     print("min file datetime:", data["Datetime"].min())
     print("time_threshold:", time_threshold)
-    
+
     before = len(data)
     filtered = data[data["Datetime"] >= time_threshold].copy()
     after = len(filtered)
@@ -871,9 +902,17 @@ def main():
     print("✅ Saved:", out_png)
     print("✅ Saved:", out_latest)
 
-    # FTP upload + prune
-    upload_to_ftp(out_png)
-    upload_to_ftp(out_latest)
+    # FTP upload + prune (robust; prune non-fatal)
+    try:
+        upload_to_ftp(out_png)
+    except Exception as e:
+        print(f"⚠️ Upload failed for {os.path.basename(out_png)}: {e}")
+
+    try:
+        upload_to_ftp(out_latest)
+    except Exception as e:
+        print(f"⚠️ Upload failed for {os.path.basename(out_latest)}: {e}")
+
     prune_remote_cyprus_pngs(keep=144)
 
 
