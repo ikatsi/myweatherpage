@@ -21,6 +21,7 @@ jobs:
       FTP_USER:           ${{ secrets.FTP_USER }}
       FTP_PASS:           ${{ secrets.FTP_PASS }}
       GEOJSON_PASS:       ${{ secrets.GEOJSON_PASS }}
+      BRAND_NAME: ${{ secrets.BRAND_NAME }}
 
     steps:
       - name: Debug context
