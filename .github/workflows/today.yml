@@ -2,8 +2,6 @@ name: Build Today maps
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "5,25,45 * * * *"
 
 concurrency:
   group: today-${{ github.workflow }}-${{ github.ref }}
