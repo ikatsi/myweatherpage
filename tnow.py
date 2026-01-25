@@ -269,21 +269,67 @@ def fetch_text(url: str) -> str:
     if not url:
         raise SystemExit("CURRENTWEATHER_URL is not set.")
     last_exc = None
+
+    def _looks_like_tsv(payload: str) -> bool:
+        if not payload:
+            return False
+        head = payload.lstrip().lower()
+
+        # obvious HTML / error pages
+        if head.startswith("<!doctype") or head.startswith("<html") or "<html" in head[:500]:
+            return False
+
+        # require that at least one of the first few non-empty lines contains tabs
+        lines = [ln for ln in payload.splitlines() if ln.strip()][:15]
+        if not lines:
+            return False
+
+        # many of your feeds have a header with Datetime / Latitude / Longitude
+        joined = "\n".join(lines).lower()
+        if "datetime" not in joined:
+            return False
+
+        # must look tab-delimited
+        if not any("\t" in ln for ln in lines):
+            return False
+
+        return True
+
     for i in range(MAX_RETRIES):
         try:
             r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
             r.raise_for_status()
             r.encoding = "utf-8"
-            return r.text
+            text = r.text
+
+            if not _looks_like_tsv(text):
+                raise requests.exceptions.RequestException(
+                    "Response did not look like tab-delimited weather data (possible HTML/partial response)."
+                )
+
+            return text
+
         except requests.exceptions.RequestException as e:
             last_exc = e
             print(f"🌧️ Attempt {i+1} failed: {e}")
             time.sleep(DELAY)
+
     raise SystemExit(last_exc)
 
 
 def read_tabbed_df(text: str) -> pd.DataFrame:
-    df = pd.read_csv(StringIO(text), sep="\t")
+    # First try: fast C engine
+    try:
+        df = pd.read_csv(StringIO(text), sep="\t")
+    except Exception:
+        # Fallback: python engine + skip malformed lines so one broken row cannot kill the run
+        df = pd.read_csv(
+            StringIO(text),
+            sep="\t",
+            engine="python",
+            on_bad_lines="skip"
+        )
+
     df.columns = (
         df.columns.astype(str)
         .str.replace("\ufeff", "", regex=False)
@@ -294,7 +340,6 @@ def read_tabbed_df(text: str) -> pd.DataFrame:
         if c.lower() == "datetime" and c != "Datetime":
             df.rename(columns={c: "Datetime"}, inplace=True)
     return df
-
 
 # =========================
 # GENERIC IDW (works for meters or degrees)
