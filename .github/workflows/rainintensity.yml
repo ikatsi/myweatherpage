@@ -2,9 +2,7 @@ name: Build rain intensity maps
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/15 * * * *"
-
+  
 concurrency:
   group: rain-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
