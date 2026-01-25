@@ -79,7 +79,11 @@ GRID_LON_MIN, GRID_LON_MAX = 19.0, 30.0
 GRID_LAT_MIN, GRID_LAT_MAX = 34.5, 42.5
 GRID_N = 300
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "text/plain, text/*;q=0.9, */*;q=0.8",
+    "Accept-Encoding": "identity",
+}
 MAX_RETRIES = 5
 DELAY = 10
 TIMEOUT = 20
@@ -245,9 +249,15 @@ def fetch_weathernow_text(url: str) -> str:
     if not url:
         raise SystemExit("CURRENTWEATHER_URL is not set.")
     last_exc = None
+
     for i in range(MAX_RETRIES):
         try:
             r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+            if r.status_code == 415:
+                # Show what the server says it wants (often hints at required Accept/content type)
+                ct = r.headers.get("Content-Type", "")
+                print(f"🌧️ 415 Unsupported Media Type (Content-Type={ct})")
+                print("🌧️ First 200 bytes of response:", r.text[:200].replace("\n", " "))
             r.raise_for_status()
             r.encoding = "utf-8"
             return r.text
@@ -255,6 +265,7 @@ def fetch_weathernow_text(url: str) -> str:
             last_exc = e
             print(f"🌧️ Attempt {i+1} failed: {e}")
             time.sleep(DELAY)
+
     print("❌ All attempts to fetch data failed.")
     raise SystemExit(last_exc)
 
