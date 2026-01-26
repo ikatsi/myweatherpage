@@ -22,8 +22,6 @@ jobs:
       FTP_HOST:           ${{ secrets.FTP_HOST }}
       FTP_USER:           ${{ secrets.FTP_USER }}
       FTP_PASS:           ${{ secrets.FTP_PASS }}
-      GDRIVE_SA_JSON:     ${{ secrets.GDRIVE_SA_JSON }}
-      GDRIVE_FOLDER_ID:  ${{ secrets.GDRIVE_FOLDER_ID }}
 
     steps:
       - name: Checkout
@@ -73,34 +71,6 @@ jobs:
         run: |
           python -V
           python rainintensityattiki.py
-
-      - name: Install rclone
-        run: |
-          curl -fsSL https://rclone.org/install.sh | sudo bash
-          rclone version
-
-      - name: Configure rclone (Google Drive SA)
-        run: |
-          mkdir -p ~/.config/rclone
-          python - <<'PY'
-          import os, pathlib
-          cfg_dir = pathlib.Path.home() / ".config" / "rclone"
-          cfg_dir.mkdir(parents=True, exist_ok=True)
-          sa_path = cfg_dir / "gdrive-sa.json"
-          sa_path.write_text(os.environ["GDRIVE_SA_JSON"], encoding="utf-8")
-          conf = f"""[gdrive]
-          type = drive
-          scope = drive
-          service_account_file = {sa_path}
-          """
-          (cfg_dir / "rclone.conf").write_text(conf, encoding="utf-8")
-          PY
-
-      - name: Upload PNGs to Google Drive (single folder)
-        run: |
-          DEST="gdrive:/${GDRIVE_FOLDER_ID}"
-          echo "Uploading to: $DEST"
-          rclone copy "rainintensitymaps/" "$DEST" --include "*.png" --checksum -v
 
       - name: Upload PNG artifacts
         if: always()
