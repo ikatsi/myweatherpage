@@ -84,23 +84,31 @@ jobs:
           mkdir -p ~/.config/rclone
           python - <<'PY'
           import os, pathlib
+
           cfg_dir = pathlib.Path.home() / ".config" / "rclone"
           cfg_dir.mkdir(parents=True, exist_ok=True)
+
           sa_path = cfg_dir / "gdrive-sa.json"
           sa_path.write_text(os.environ["GDRIVE_SA_JSON"], encoding="utf-8")
-          conf = f"""[gdrive]
-          type = drive
-          scope = drive
-          service_account_file = {sa_path}
-          """
+
+          folder_id = os.environ["GDRIVE_FOLDER_ID"].strip()
+
+          conf = (
+              "[gdrive]\n"
+              "type = drive\n"
+              "scope = drive\n"
+              f"service_account_file = {sa_path}\n"
+              f"root_folder_id = {folder_id}\n"
+          )
+
           (cfg_dir / "rclone.conf").write_text(conf, encoding="utf-8")
+          print("Wrote rclone config:", cfg_dir / "rclone.conf")
           PY
 
       - name: Upload PNGs to Google Drive (single folder)
         run: |
-          DEST="gdrive:/${GDRIVE_FOLDER_ID}"
-          echo "Uploading to: $DEST"
-          rclone copy "rainintensitymaps/" "$DEST" --include "*.png" --checksum -v
+          echo "Uploading into Google Drive folder ID (as rclone root_folder_id): $GDRIVE_FOLDER_ID"
+          rclone copy "rainintensitymaps/" "gdrive:/" --include "*.png" --checksum -v
 
       - name: Upload PNG artifacts
         if: always()
