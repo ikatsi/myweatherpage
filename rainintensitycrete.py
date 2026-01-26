@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# rainintensityattiki.py
+# rainintensitycrete.py
 #
 # Same map, but EVERYTHING is handled/plotted in Greek Grid (EGSA87) EPSG:2100:
 # - Interpolation grid is in meters (EPSG:2100)
@@ -9,8 +9,8 @@
 # - Plot geometry stays EPSG:2100, but AXES are LABELLED as lon/lat degrees (tick formatter)
 #
 # Output:
-#   ./rainintensitymaps/rain_intensity_attica_YYYY-MM-DD-HH-MM.png
-#   ./rainintensitymaps/latestattica.png
+#   ./rainintensitymaps/rain_intensity_crete_YYYY-MM-DD-HH-MM.png
+#   ./rainintensitymaps/latestcrete.png
 # Uploads both to FTP (explicit FTPS on port 21) and prunes old timestamped PNGs.
 
 import os
@@ -69,18 +69,16 @@ FTP_PASS = os.environ.get("FTP_PASS")
 if not FTP_HOST or not FTP_USER or not FTP_PASS:
     raise SystemExit("❌ FTP_HOST / FTP_USER / FTP_PASS not set")
 
-PREFIX = "rain_intensity_attica_"
-LATEST_NAME = "latestattica.png"
+PREFIX = "rain_intensity_crete_"
+LATEST_NAME = "latestcrete.png"
 
 CRS_WGS84 = "EPSG:4326"
 CRS_EGSA87 = "EPSG:2100"
 
 # Area of interest in lon/lat (degrees); converted internally to EGSA meters
 GRID_N = 300
-CR_LON_MIN, CR_LON_MAX = 23.0, 26.5
-CR_LAT_MIN, CR_LAT_MAX = 34.5, 36.0
-GRID_LON_MIN, GRID_LON_MAX = CR_LON_MIN, CR_LON_MAX
-GRID_LAT_MIN, GRID_LAT_MAX = CR_LAT_MIN, CR_LAT_MAX
+GRID_LON_MIN, GRID_LON_MAX = 23.0, 26.5
+GRID_LAT_MIN, GRID_LAT_MAX = 34.5, 36.0
 
 # IDW settings (meters)
 IDW_POWER = 2
