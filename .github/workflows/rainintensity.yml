@@ -1,10 +1,10 @@
-name: Build rain intensity maps
+name: Build Crete rain intensity maps (EGSA2100)
 
 on:
   workflow_dispatch:
-  
+
 concurrency:
-  group: rain-${{ github.workflow }}-${{ github.ref }}
+  group: rain-crete-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -13,13 +13,17 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
+
     env:
+      MPLBACKEND: Agg
       CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
       GEOJSON_PASS:       ${{ secrets.GEOJSON_PASS }}
       FTP_HOST:           ${{ secrets.FTP_HOST }}
       FTP_USER:           ${{ secrets.FTP_USER }}
       FTP_PASS:           ${{ secrets.FTP_PASS }}
+      GDRIVE_SA_JSON:     ${{ secrets.GDRIVE_SA_JSON }}
+      GDRIVE_FOLDER_ID:  ${{ secrets.GDRIVE_FOLDER_ID }}
 
     steps:
       - name: Checkout
@@ -34,9 +38,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-rain-${{ hashFiles('**/requirements.txt') }}
+          key: ${{ runner.os }}-pip-crete-${{ hashFiles('**/requirements.txt') }}
           restore-keys: |
-            ${{ runner.os }}-pip-rain-
+            ${{ runner.os }}-pip-crete-
 
       - name: Install Python deps
         run: |
@@ -45,41 +49,64 @@ jobs:
             numpy pandas matplotlib scipy requests \
             rasterio shapely pyproj fiona geopandas pyogrio
 
-      - name: Decrypt greece.geojson if needed
-        if: ${{ hashFiles('greece.geojson') == '' }}
+      - name: Decrypt Greece GeoJSON
         run: |
           test -f greece.geojson.enc || { echo "greece.geojson.enc missing"; exit 1; }
-          test -n "${GEOJSON_PASS}"   || { echo "GEOJSON_PASS not set"; exit 1; }
           openssl enc -d -aes-256-cbc -pbkdf2 \
             -in greece.geojson.enc \
             -out greece.geojson \
             -pass pass:"${GEOJSON_PASS}"
-          ls -l greece.geojson
+          ls -lh greece.geojson
 
-      - name: Decrypt and unzip altitude bundle if needed
+      - name: Decrypt and unzip altitude bundle
         run: |
-          if [ ! -f GRC_alt.vrt ]; then
-            test -f altitude.zip.enc || { echo "altitude.zip.enc missing"; exit 1; }
-            test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
-            openssl enc -d -aes-256-cbc -pbkdf2 \
-              -in altitude.zip.enc \
-              -out altitude.zip \
-              -pass pass:"${GEOJSON_PASS}"
-            unzip -o altitude.zip
-            rm -f altitude.zip
-          fi
-          ls -l GRC_alt.*
+          test -f altitude.zip.enc || { echo "altitude.zip.enc missing"; exit 1; }
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in altitude.zip.enc \
+            -out altitude.zip \
+            -pass pass:"${GEOJSON_PASS}"
+          unzip -o altitude.zip
+          rm -f altitude.zip
+          ls -lh GRC_alt.*
 
-      - name: Run rainintensity.py
+      - name: Run rainintensitycrete.py
         run: |
           python -V
-          python rainintensity.py
+          python rainintensitycrete.py
+
+      - name: Install rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      - name: Configure rclone (Google Drive SA)
+        run: |
+          mkdir -p ~/.config/rclone
+          python - <<'PY'
+          import os, pathlib
+          cfg_dir = pathlib.Path.home() / ".config" / "rclone"
+          cfg_dir.mkdir(parents=True, exist_ok=True)
+          sa_path = cfg_dir / "gdrive-sa.json"
+          sa_path.write_text(os.environ["GDRIVE_SA_JSON"], encoding="utf-8")
+          conf = f"""[gdrive]
+          type = drive
+          scope = drive
+          service_account_file = {sa_path}
+          """
+          (cfg_dir / "rclone.conf").write_text(conf, encoding="utf-8")
+          PY
+
+      - name: Upload PNGs to Google Drive (single folder)
+        run: |
+          DEST="gdrive:/${GDRIVE_FOLDER_ID}"
+          echo "Uploading to: $DEST"
+          rclone copy "rainintensitymaps/" "$DEST" --include "*.png" --checksum -v
 
       - name: Upload PNG artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rainintensitymaps
+          name: rainintensitycrete
           path: rainintensitymaps/*.png
           if-no-files-found: warn
           retention-days: 7
