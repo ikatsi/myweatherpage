@@ -836,7 +836,7 @@ def main():
     try:
         upload_to_ftp(output_file)
         upload_to_ftp(latest_output)
-        prune_remote_pngs(keep=40, prefix=PREFIX, latest_name=LATEST_NAME)
+        prune_remote_pngs(keep=200, prefix=PREFIX, latest_name=LATEST_NAME)
     except Exception as e:
         print(f"⚠️ FTP upload/prune failed: {e}")
 
