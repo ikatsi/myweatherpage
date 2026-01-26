@@ -1,10 +1,10 @@
-name: Build Crete rain intensity maps (EGSA2100)
+name: Build Greece rain intensity maps
 
 on:
   workflow_dispatch:
 
 concurrency:
-  group: rain-crete-${{ github.workflow }}-${{ github.ref }}
+  group: rain-greece-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -38,9 +38,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-crete-${{ hashFiles('**/requirements.txt') }}
+          key: ${{ runner.os }}-pip-greece-${{ hashFiles('**/requirements.txt') }}
           restore-keys: |
-            ${{ runner.os }}-pip-crete-
+            ${{ runner.os }}-pip-greece-
 
       - name: Install Python deps
         run: |
@@ -69,10 +69,10 @@ jobs:
           rm -f altitude.zip
           ls -lh GRC_alt.*
 
-      - name: Run rainintensitycrete.py
+      - name: Run rainintensity.py
         run: |
           python -V
-          python rainintensitycrete.py
+          python rainintensity.py
 
       - name: Install rclone
         run: |
@@ -106,7 +106,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rainintensitycrete
+          name: rainintensity
           path: rainintensitymaps/*.png
           if-no-files-found: warn
           retention-days: 7
