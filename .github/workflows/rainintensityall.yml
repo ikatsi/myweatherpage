@@ -3,24 +3,23 @@ name: rainintensityall
 on:
   workflow_dispatch:
 
-concurrency:
-  group: rainintensityall
-  cancel-in-progress: true
+permissions:
+  contents: read
 
 jobs:
   run:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: ubuntu-24.04
 
     env:
       TZ: Europe/Athens
 
-      # Same secret names pattern as your other workflows
+      # FTP secrets (already present in your log)
       FTP_HOST: ${{ secrets.FTP_HOST }}
       FTP_USER: ${{ secrets.FTP_USER }}
       FTP_PASS: ${{ secrets.FTP_PASS }}
 
-      # Keep if your script reads it from env (harmless if unused)
+      # Feed URL(s) used by rainintensityall.py
+      CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
       TXT_URL: ${{ secrets.TXT_URL }}
 
     steps:
@@ -31,33 +30,25 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-          cache: "pip"
+          cache: pip
 
-      - name: Install system packages (GDAL stack)
+      - name: System dependencies (GDAL/PROJ/GEOS)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gdal-bin \
-            libgdal-dev \
-            python3-dev \
-            build-essential
+          sudo apt-get install -y \
+            build-essential \
+            gdal-bin libgdal-dev \
+            proj-bin libproj-dev \
+            libgeos-dev \
+            python3-dev
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install numpy pandas matplotlib geopandas shapely pyproj fiona rasterio scipy requests
-          fi
+          python -m pip install -r requirements.txt
 
-      # If your other workflows decrypt assets (geojson, altitude, etc.), paste that same decrypt block here.
-      # I am leaving it as a no-op placeholder so this file matches the "manual trigger only" requirement
-      # without guessing your exact decrypt commands/secret names.
-      - name: Assets (if any)
-        run: |
-          echo "No decrypt step configured in this workflow."
-
+      # If you have encrypted assets in other workflows, this is the place to add
+      # the same decrypt/unzip steps. For now we keep it off like your current run.
       - name: Run rainintensityall.py
         run: |
           python rainintensityall.py
