@@ -814,7 +814,7 @@ def build_temperature_grid_local_lr_projected(
 # =============================================================================
 # COMMON FEED CLEANING
 # =============================================================================
-def load_and_clean_feed(text: str, cache_txt: str = "") -> pd.DataFrame:
+def load_and_clean_feed(text: str, cache_txt: str = "", lon_min=None, lon_max=None) -> pd.DataFrame:
     df = pd.read_csv(StringIO(text), delimiter="\t", engine="python")
     df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
 
@@ -832,7 +832,6 @@ def load_and_clean_feed(text: str, cache_txt: str = "") -> pd.DataFrame:
     else:
         df["TNow"] = np.nan
 
-    # Datetime: parse then localize to Athens if naive
     df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce")
     dt = df["Datetime"]
     try:
@@ -844,7 +843,6 @@ def load_and_clean_feed(text: str, cache_txt: str = "") -> pd.DataFrame:
         print(f"⚠️ Datetime tz handling failed ({e}); leaving as-is (may be naive).")
     df["Datetime"] = dt
 
-    # Drop invalid essentials
     before = len(df)
     df = df.dropna(subset=["Latitude", "Longitude", "RainIntensity", "Datetime"]).copy()
     print(f"🧹 dropna essentials: {before} -> {len(df)} (removed {before - len(df)})")
@@ -853,19 +851,23 @@ def load_and_clean_feed(text: str, cache_txt: str = "") -> pd.DataFrame:
     df = df[(df["Latitude"] != 0) & (df["Longitude"] != 0)].copy()
     print(f"🧹 drop zero lat/lon: {before} -> {len(df)} (removed {before - len(df)})")
 
-    # Known bad webcodes
     if "webcode" in df.columns:
         bad = ["agrivate_rizia", "metaxochori"]
         before = len(df)
         df = df[~df["webcode"].astype(str).str.lower().isin(bad)].copy()
         print(f"🧹 remove bad webcodes {bad}: {before} -> {len(df)} (removed {before - len(df)})")
 
-    # A guard you used often
-    before = len(df)
-    df = df[df["Longitude"] <= 30].copy()
-    print(f"🧹 lon <= 30: {before} -> {len(df)} (removed {before - len(df)})")
+    # Optional lon/lat guard (region-specific)
+    if lon_min is not None:
+        before = len(df)
+        df = df[df["Longitude"] >= float(lon_min)].copy()
+        print(f"🧹 lon >= {lon_min}: {before} -> {len(df)} (removed {before - len(df)})")
 
-    # Drop NaT after tz handling
+    if lon_max is not None:
+        before = len(df)
+        df = df[df["Longitude"] <= float(lon_max)].copy()
+        print(f"🧹 lon <= {lon_max}: {before} -> {len(df)} (removed {before - len(df)})")
+
     before = len(df)
     df = df.dropna(subset=["Datetime"]).copy()
     print(f"🧹 drop NaT after tz: {before} -> {len(df)} (removed {before - len(df)})")
@@ -929,12 +931,13 @@ def run_greece():
         print("❌ Failed to fetch data from feed.")
         return
 
-    df = load_and_clean_feed(text)
+    df = load_and_clean_feed(text, lon_max=30)
     print(f"📥 Raw(cleaned) rows: {len(df)}")
     print_latest_rows(df, n=8, title="(Cleaned feed preview)")
 
     # Time filter
     athens_now = datetime.now(ATHENS_TZ)
+
     time_threshold = athens_now - timedelta(minutes=TIME_WINDOW_MIN)
     print("athens_now:", athens_now)
     print("max file datetime:", df["Datetime"].max())
@@ -1207,7 +1210,8 @@ def run_egsa_region(cfg: dict):
         print(f"❌ Failed to fetch data: {e}")
         return
 
-    df = load_and_clean_feed(text)
+    df = load_and_clean_feed(text, lon_min=19, lon_max=30)
+
     print(f"📥 Raw(cleaned) rows: {len(df)}")
 
     # time filter
