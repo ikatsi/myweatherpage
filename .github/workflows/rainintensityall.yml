@@ -1,58 +1,139 @@
-name: rainintensityall
+# .github/workflows/rainintensityall.yml
+# bump: 2026-02-01
+name: Build rain intensity maps (Greece + regions + Cyprus)
 
 on:
   workflow_dispatch:
 
+concurrency:
+  group: rain-all-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
-concurrency:
-  group: rainintensityall-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   run:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
     env:
       TZ: Europe/Athens
+      MPLBACKEND: Agg
 
-      # --- Weather feed URL (this is what you're missing) ---
-      # If you stored it as a Secret:
+      # feed + ftp (shared)
       CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
-      # If instead you stored it as a Repository Variable, use this line instead:
-      # CURRENTWEATHER_URL: ${{ vars.CURRENTWEATHER_URL }}
+      FTP_HOST:           ${{ secrets.FTP_HOST }}
+      FTP_USER:           ${{ secrets.FTP_USER }}
+      FTP_PASS:           ${{ secrets.FTP_PASS }}
 
-      # --- FTP creds ---
-      FTP_HOST: ${{ secrets.FTP_HOST }}
-      FTP_USER: ${{ secrets.FTP_USER }}
-      FTP_PASS: ${{ secrets.FTP_PASS }}
-
-      # --- If your script decrypts assets, keep names consistent with the script ---
-      # e.g. if rainintensityall.py expects GEOJSON_PASS / ASSETS_PASS, set the right one:
-      GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
-      # ASSETS_PASS: ${{ secrets.ASSETS_PASS }}
+      # decrypt passwords (can be the same or different)
+      GEOJSON_PASS:       ${{ secrets.GEOJSON_PASS }}
+      CYPRUS_PASS:        ${{ secrets.CYPRUS_GEOJSON_PASS }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-          cache: "pip"
+          cache: pip
 
-      - name: System deps (GDAL stack)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gdal-bin libgdal-dev
-
-      - name: Install Python deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run script
+      # Optional but helpful: makes DNS issues obvious and retries a bit
+      - name: DNS preflight for FTP host
+        shell: bash
         run: |
           set -euo pipefail
+          test -n "${FTP_HOST}" || { echo "FTP_HOST not set"; exit 1; }
+          for i in {1..6}; do
+            echo "Attempt $i: resolving ${FTP_HOST}"
+            if getent hosts "${FTP_HOST}"; then
+              echo "DNS OK"
+              exit 0
+            fi
+            sleep $((i*5))
+          done
+          echo "DNS still failing for ${FTP_HOST}"
+          exit 1
+
+      # If you still need system libs, keep this. If everything works with wheels, you can remove it.
+      - name: System packages (proj, gdal)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gdal-bin proj-bin proj-data \
+            libproj-dev libgeos-dev
+          gdalinfo --version || true
+          projinfo -v || true
+
+      - name: Install Python deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -V
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install --only-binary=:all: \
+              numpy pandas matplotlib scipy requests \
+              rasterio shapely pyproj fiona geopandas pyogrio
+          fi
+
+      - name: Decrypt assets (Greece + Cyprus)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # ---- Greece (optional) ----
+          # Adjust filenames/paths to match your repo
+          if [ -f "greece.geojson.enc" ]; then
+            test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
+            openssl enc -d -aes-256-cbc -pbkdf2 \
+              -in "greece.geojson.enc" \
+              -out "greece.geojson" \
+              -pass env:GEOJSON_PASS
+            ls -lh greece.geojson
+          fi
+
+          # ---- Cyprus ----
+          # Matches your older cyprus workflow, but uses CYPRUS_PASS secret
+          test -n "${CYPRUS_PASS}" || { echo "CYPRUS_PASS not set (set secret CYPRUS_GEOJSON_PASS)"; exit 1; }
+
+          test -f "cyprus.geojson.enc" || { echo "cyprus.geojson.enc missing"; exit 1; }
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in "cyprus.geojson.enc" \
+            -out "cyprus.geojson" \
+            -pass env:CYPRUS_PASS
+          ls -lh cyprus.geojson
+
+          # If you use a Cyprus altitude raster
+          if [ -f "cyprus.tif.enc" ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 \
+              -in "cyprus.tif.enc" \
+              -out "cyprus_dsm_90m.tif" \
+              -pass env:CYPRUS_PASS
+            ls -lh cyprus_dsm_90m.tif
+          fi
+
+      - name: Run rainintensityall.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -V
           python rainintensityall.py
+
+      - name: Upload PNG artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rainintensity_all
+          path: |
+            rainintensitymaps/*.png
+            cyprusrainintensitymaps/*.png
+          if-no-files-found: warn
+          retention-days: 7
