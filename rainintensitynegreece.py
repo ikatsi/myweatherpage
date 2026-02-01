@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# rainintensityattiki.py
+# rainintensitynegreece.py
 #
 # Same map, but EVERYTHING is handled/plotted in Greek Grid (EGSA87) EPSG:2100:
 # - Interpolation grid is in meters (EPSG:2100)
@@ -9,8 +9,8 @@
 # - Plot geometry stays EPSG:2100, but AXES are LABELLED as lon/lat degrees (tick formatter)
 #
 # Output:
-#   ./rainintensitymaps/rain_intensity_attica_YYYY-MM-DD-HH-MM.png
-#   ./rainintensitymaps/latestattica.png
+#   ./rainintensitymaps/rain_intensity_negreece_YYYY-MM-DD-HH-MM.png
+#   ./rainintensitymaps/latestnegreece.png
 # Uploads both to FTP (explicit FTPS on port 21) and prunes old timestamped PNGs.
 
 import os
@@ -69,8 +69,8 @@ FTP_PASS = os.environ.get("FTP_PASS")
 if not FTP_HOST or not FTP_USER or not FTP_PASS:
     raise SystemExit("❌ FTP_HOST / FTP_USER / FTP_PASS not set")
 
-PREFIX = "rain_intensity_attica_"
-LATEST_NAME = "latestattica.png"
+PREFIX = "rain_intensity_negreece_"
+LATEST_NAME = "latestnegreece.png"
 
 CRS_WGS84 = "EPSG:4326"
 CRS_EGSA87 = "EPSG:2100"
@@ -78,7 +78,7 @@ CRS_EGSA87 = "EPSG:2100"
 # Area of interest in lon/lat (degrees); converted internally to EGSA meters
 GRID_N = 300
 GRID_LON_MIN, GRID_LON_MAX = 22.0, 27.0
-GRID_LAT_MIN, GRID_LAT_MAX = 39.9, 42.0
+GRID_LAT_MIN, GRID_LAT_MAX = 39.85, 42.0
 
 # IDW settings (meters)
 IDW_POWER = 2
@@ -146,7 +146,7 @@ def upload_to_ftp(local_file: str) -> None:
 def prune_remote_pngs(keep: int = 40, prefix: str = PREFIX, latest_name: str = LATEST_NAME) -> None:
     """
     Remote prune:
-      - Keep latestattica.png
+      - Keep latestnegreece.png
       - Keep newest `keep` files matching: PREFIX + YYYY-MM-DD-HH-MM.png
       - Delete older ones
     Only touches files starting with `prefix`.
