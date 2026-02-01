@@ -1,39 +1,48 @@
-name: Rain intensity ALL (manual)
+name: rainintensityall
 
 on:
   workflow_dispatch:
 
-concurrency:
-  group: rainintensityall
-  cancel-in-progress: true
-
 permissions:
   contents: read
 
+concurrency:
+  group: rainintensityall-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   run:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-
-    # Copy this env block from tnow.yml EXACTLY (same secret names)
+    runs-on: ubuntu-24.04
     env:
+      TZ: Europe/Athens
+
+      # --- Weather feed URL (this is what you're missing) ---
+      # If you stored it as a Secret:
+      CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
+      # If instead you stored it as a Repository Variable, use this line instead:
+      # CURRENTWEATHER_URL: ${{ vars.CURRENTWEATHER_URL }}
+
+      # --- FTP creds ---
       FTP_HOST: ${{ secrets.FTP_HOST }}
       FTP_USER: ${{ secrets.FTP_USER }}
       FTP_PASS: ${{ secrets.FTP_PASS }}
-      ASSETS_PASS: ${{ secrets.ASSETS_PASS }}
-      TZ: Europe/Athens
+
+      # --- If your script decrypts assets, keep names consistent with the script ---
+      # e.g. if rainintensityall.py expects GEOJSON_PASS / ASSETS_PASS, set the right one:
+      GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
+      # ASSETS_PASS: ${{ secrets.ASSETS_PASS }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: "pip"
 
-      - name: System dependencies (GDAL/GEOS/PROJ)
+      - name: System deps (GDAL stack)
         run: |
           sudo apt-get update
           sudo apt-get install -y gdal-bin libgdal-dev
@@ -41,36 +50,9 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install numpy pandas geopandas shapely pyproj fiona matplotlib requests
-          fi
+          pip install -r requirements.txt
 
-      # Keep ONLY if your rain intensity scripts need the same encrypted assets as tnow.yml
-      - name: Decrypt assets (same as tnow.yml)
-        shell: bash
+      - name: Run script
         run: |
           set -euo pipefail
-          mkdir -p data
-
-          if [ -f "data/greece.geojson.enc" ]; then
-            openssl aes-256-cbc -pbkdf2 -d \
-              -in "data/greece.geojson.enc" \
-              -out "data/greece.geojson" \
-              -pass pass:"$ASSETS_PASS"
-          fi
-
-          if [ -f "data/altitude.zip.enc" ]; then
-            openssl aes-256-cbc -pbkdf2 -d \
-              -in "data/altitude.zip.enc" \
-              -out "data/altitude.zip" \
-              -pass pass:"$ASSETS_PASS"
-            unzip -o "data/altitude.zip" -d "data/"
-          fi
-
-      - name: Run ALL rain intensity pipeline
-        run: |
-          set -euo pipefail
-          # CHANGE THIS to your real entrypoint if different:
           python rainintensityall.py
