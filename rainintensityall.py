@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-rainintensity_all.py
+rainintensityall.py
 
 Single entrypoint for all rain-intensity maps:
   - Greece (WGS84 degrees) + snowflakes + snowline altitude labels (local lapse regression)
@@ -83,6 +83,28 @@ FTP_PASS = os.environ.get("FTP_PASS", "").strip()
 
 def ftp_enabled():
     return bool(FTP_HOST and FTP_USER and FTP_PASS)
+
+def ftps_connect_with_retries(host, user, passwd, attempts=6, base_sleep=5, timeout=60):
+    """
+    Retries FTPS connect/login. Fixes transient runner DNS failures like:
+      [Errno -3] Temporary failure in name resolution
+    """
+    last_err = None
+    for i in range(attempts):
+        try:
+            ftps = FTP_TLS()
+            ftps.connect(host, 21, timeout=timeout)
+            ftps.login(user=user, passwd=passwd)
+            ftps.prot_p()
+            ftps.set_pasv(True)
+            return ftps
+        except (socket.gaierror, OSError) as e:
+            last_err = e
+            sleep_s = base_sleep * (2 ** i)
+            print(f"⚠️ FTPS connect failed ({type(e).__name__}: {e}). Retry in {sleep_s}s...")
+            time.sleep(sleep_s)
+    raise last_err
+
 
 # Encrypted assets (Greece + EGSA)
 GEOJSON_PASS = os.environ.get("GEOJSON_PASS", "").strip()
@@ -314,11 +336,7 @@ def ftp_upload_file(local_file: str, timeout: int = 60):
         return
 
     remote_filename = os.path.basename(local_file)
-    ftps = FTP_TLS()
-    ftps.connect(FTP_HOST, 21, timeout=timeout)
-    ftps.login(user=FTP_USER, passwd=FTP_PASS)
-    ftps.prot_p()
-    ftps.set_pasv(True)
+    ftps = ftps_connect_with_retries(FTP_HOST, FTP_USER, FTP_PASS, attempts=6, base_sleep=5, timeout=timeout)
 
     try:
         with open(local_file, "rb") as f:
@@ -346,11 +364,8 @@ def ftp_prune_timestamped(prefix: str, latest_name: str, keep: int):
 
     pat = re.compile(rf"^{re.escape(prefix)}\d{{4}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}}\.png$")
 
-    ftps = FTP_TLS()
-    ftps.connect(FTP_HOST, 21, timeout=60)
-    ftps.login(user=FTP_USER, passwd=FTP_PASS)
-    ftps.prot_p()
-    ftps.set_pasv(True)
+    ftps = ftps_connect_with_retries(FTP_HOST, FTP_USER, FTP_PASS, attempts=6, base_sleep=5, timeout=60)
+
 
     try:
         try:
