@@ -84,6 +84,31 @@ FTP_PASS = os.environ.get("FTP_PASS", "").strip()
 def ftp_enabled():
     return bool(FTP_HOST and FTP_USER and FTP_PASS)
 
+
+def fmt_data_until(dtval) -> str:
+    """
+    Format the latest Datetime used in the map, in Athens time, without seconds.
+    Accepts pandas Timestamp or datetime.
+    """
+    if dtval is None or (isinstance(dtval, float) and np.isnan(dtval)):
+        return "—"
+    try:
+        ts = pd.to_datetime(dtval)
+        # Ensure Athens tz
+        if getattr(ts, "tzinfo", None) is None and getattr(ts, "tz", None) is None:
+            ts = ts.tz_localize("Europe/Athens", ambiguous="NaT", nonexistent="NaT")
+        else:
+            ts = ts.tz_convert("Europe/Athens")
+        if pd.isna(ts):
+            return "—"
+        return ts.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        try:
+            return dtval.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return "—"
+
+
 def ftps_connect_with_retries(host, user, passwd, attempts=6, base_sleep=5, timeout=60):
     """
     Retries FTPS connect/login. Fixes transient runner DNS failures like:
@@ -948,8 +973,12 @@ def run_greece():
     df = df[df["Datetime"] >= time_threshold].copy()
     print(f"⏱️ time filter (last {TIME_WINDOW_MIN} min): {before} -> {len(df)} (removed {before - len(df)})")
     if df.empty:
-        print("⚠️ No data points available after filters. Exiting.")
-        return
+      print("⚠️ No data points available within the time window. Exiting.")
+      return
+
+    data_until = df["Datetime"].max()
+    data_until_str = fmt_data_until(data_until)
+
 
     # Optional Greece-only filter
     if "Country" in df.columns:
@@ -959,6 +988,9 @@ def run_greece():
         print(f"🇬🇷 Country filter: {before} -> {len(df)} (removed {before - len(df)})")
 
     print_latest_rows(df, n=8, title="(After time/country preview)")
+    data_until = df["Datetime"].max()
+    data_until_str = fmt_data_until(data_until)
+
 
     lats = df["Latitude"].values.astype(float)
     lons = df["Longitude"].values.astype(float)
@@ -1112,7 +1144,7 @@ def run_greece():
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
     timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M %Z")
-    left_text = f"Δημιουργήθηκε για το e-kairos.gr\n{timestamp_text}"
+    left_text = f"Δημιουργήθηκε για το e-kairos.gr\n{timestamp_text}\nμε δεδομένα έως και {data_until_str}"
     right_text = f"v4.0-local\nΧιονόπτωση ≤ {SNOW_T_C:.1f}°C\nΣυνολ. βαροβαθμιδα: {b_global*1000:.2f} °C/km"
 
     ax.text(
@@ -1627,6 +1659,9 @@ def run_cyprus():
     if df.empty:
         print("⚠️ No data points after filters. Exiting.")
         return
+    data_until = df["Datetime"].max()
+    data_until_str = fmt_data_until(data_until)
+
 
     # stations in UTM
     to_utm = Transformer.from_crs(CRS_WGS84, CRS_UTM, always_xy=True)
@@ -1830,9 +1865,11 @@ def run_cyprus():
     ax.set_title("Υπολογ. τελευταία διαθέσιμη ραγδαιότητα υετού", fontsize=14, pad=10, loc="center")
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
-    timestamp_text = athens_now.strftime("Δημιουργήθηκε: %Y-%m-%d %H:%M %Z για το e-kairos.gr")
+    timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M %Z")
+    left_text = f"Δημιουργήθηκε για το e-kairos.gr\n{timestamp_text}\nμε δεδομένα έως και {data_until_str}"
+    
     ax.text(
-        0.01, 0.01, timestamp_text,
+        0.01, 0.01, left_text,
         transform=ax.transAxes,
         fontsize=10,
         color="black",
