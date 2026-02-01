@@ -1,6 +1,5 @@
-# .github/workflows/rainintensityall.yml
 # bump: 2026-02-01
-name: Build rain intensity maps (Greece + regions + Cyprus)
+name: Build rain intensity maps (all regions)
 
 on:
   workflow_dispatch:
@@ -15,21 +14,15 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
 
     env:
-      TZ: Europe/Athens
       MPLBACKEND: Agg
-
-      # feed + ftp (shared)
       CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
+      GEOJSON_PASS:       ${{ secrets.GEOJSON_PASS }}
       FTP_HOST:           ${{ secrets.FTP_HOST }}
       FTP_USER:           ${{ secrets.FTP_USER }}
       FTP_PASS:           ${{ secrets.FTP_PASS }}
-
-      # decrypt passwords (can be the same or different)
-      GEOJSON_PASS:       ${{ secrets.GEOJSON_PASS }}
-      CYPRUS_PASS:        ${{ secrets.CYPRUS_GEOJSON_PASS }}
 
     steps:
       - name: Checkout
@@ -38,102 +31,85 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
-          cache: pip
+          python-version: "3.11"
 
-      # Optional but helpful: makes DNS issues obvious and retries a bit
-      - name: DNS preflight for FTP host
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "${FTP_HOST}" || { echo "FTP_HOST not set"; exit 1; }
-          for i in {1..6}; do
-            echo "Attempt $i: resolving ${FTP_HOST}"
-            if getent hosts "${FTP_HOST}"; then
-              echo "DNS OK"
-              exit 0
-            fi
-            sleep $((i*5))
-          done
-          echo "DNS still failing for ${FTP_HOST}"
-          exit 1
-
-      # If you still need system libs, keep this. If everything works with wheels, you can remove it.
-      - name: System packages (proj, gdal)
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gdal-bin proj-bin proj-data \
-            libproj-dev libgeos-dev
-          gdalinfo --version || true
-          projinfo -v || true
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-rainall-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-rainall-
 
       - name: Install Python deps
-        shell: bash
         run: |
-          set -euo pipefail
-          python -V
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install --only-binary=:all: \
-              numpy pandas matplotlib scipy requests \
-              rasterio shapely pyproj fiona geopandas pyogrio
-          fi
+          pip install --only-binary=:all: \
+            numpy pandas matplotlib scipy requests \
+            rasterio shapely pyproj fiona geopandas pyogrio
 
-      - name: Decrypt assets (Greece + Cyprus)
-        shell: bash
+      - name: Decrypt Greece GeoJSON
         run: |
-          set -euo pipefail
-
-          # ---- Greece (optional) ----
-          # Adjust filenames/paths to match your repo
-          if [ -f "greece.geojson.enc" ]; then
-            test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
-            openssl enc -d -aes-256-cbc -pbkdf2 \
-              -in "greece.geojson.enc" \
-              -out "greece.geojson" \
-              -pass env:GEOJSON_PASS
-            ls -lh greece.geojson
-          fi
-
-          # ---- Cyprus ----
-          # Matches your older cyprus workflow, but uses CYPRUS_PASS secret
-          test -n "${CYPRUS_PASS}" || { echo "CYPRUS_PASS not set (set secret CYPRUS_GEOJSON_PASS)"; exit 1; }
-
-          test -f "cyprus.geojson.enc" || { echo "cyprus.geojson.enc missing"; exit 1; }
+          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
+          test -f greece.geojson.enc || { echo "greece.geojson.enc missing"; exit 1; }
           openssl enc -d -aes-256-cbc -pbkdf2 \
-            -in "cyprus.geojson.enc" \
-            -out "cyprus.geojson" \
-            -pass env:CYPRUS_PASS
+            -in greece.geojson.enc \
+            -out greece.geojson \
+            -pass pass:"${GEOJSON_PASS}"
+          ls -lh greece.geojson
+
+      - name: Decrypt Greece altitude bundle (altitude.zip.enc)
+        run: |
+          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
+          test -f altitude.zip.enc || { echo "altitude.zip.enc missing"; exit 1; }
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in altitude.zip.enc \
+            -out altitude.zip \
+            -pass pass:"${GEOJSON_PASS}"
+          unzip -o altitude.zip
+          rm -f altitude.zip
+          test -f GRC_alt.vrt || { echo "GRC_alt.vrt missing after unzip"; exit 1; }
+          ls -lh GRC_alt.vrt
+
+      - name: Decrypt Cyprus GeoJSON
+        run: |
+          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
+          test -f cyprus.geojson.enc || { echo "cyprus.geojson.enc missing"; exit 1; }
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in cyprus.geojson.enc \
+            -out cyprus.geojson \
+            -pass pass:"${GEOJSON_PASS}"
           ls -lh cyprus.geojson
 
-          # If you use a Cyprus altitude raster
-          if [ -f "cyprus.tif.enc" ]; then
-            openssl enc -d -aes-256-cbc -pbkdf2 \
-              -in "cyprus.tif.enc" \
-              -out "cyprus_dsm_90m.tif" \
-              -pass env:CYPRUS_PASS
-            ls -lh cyprus_dsm_90m.tif
-          fi
-
-      - name: Run rainintensityall.py
-        shell: bash
+      - name: Decrypt Cyprus altitude GeoTIFF
         run: |
-          set -euo pipefail
-          python -V
-          python rainintensityall.py
+          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
+          test -f cyprus.tif.enc || { echo "cyprus.tif.enc missing"; exit 1; }
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in cyprus.tif.enc \
+            -out cyprus_dsm_90m.tif \
+            -pass pass:"${GEOJSON_PASS}"
+          ls -lh cyprus_dsm_90m.tif
 
-      - name: Upload PNG artifacts
+      - name: Run rainintensityall.py (all regions)
+        run: |
+          python -V
+          python rainintensityall.py --region all
+
+      - name: Upload PNG artifacts (Greece + EGSA)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rainintensity_all
-          path: |
-            rainintensitymaps/*.png
-            cyprusrainintensitymaps/*.png
+          name: rainintensity_greece_egsa
+          path: rainintensitymaps/*.png
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload PNG artifacts (Cyprus)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rainintensity_cyprus
+          path: cyprusrainintensitymaps/*.png
           if-no-files-found: warn
           retention-days: 7
