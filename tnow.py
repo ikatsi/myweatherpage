@@ -90,8 +90,8 @@ AT_LAT_MIN, AT_LAT_MAX = 37.5, 38.7
 AT_N = 300
 
 # --- Crete bbox (same EGSA approach as Attica) ---
-CR_LON_MIN, CR_LON_MAX = 23.0, 26.5
-CR_LAT_MIN, CR_LAT_MAX = 34.5, 36.0
+CR_LON_MIN, CR_LON_MAX = 23.37, 26.4
+CR_LAT_MIN, CR_LAT_MAX = 34.7, 35.78
 CR_N = 300
 
 # --- NE Greece bbox (EGSA approach like Attica/Crete) ---
