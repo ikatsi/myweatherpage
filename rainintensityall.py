@@ -1964,7 +1964,7 @@ EGSA_REGIONS = {
     },
     "crete": {
         "name": "Crete",
-        "bbox": (23.0, 26.5, 34.5, 36.0),
+        "bbox": (23.37, 26.4, 34.7, 35.78),
         "prefix": "rain_intensity_crete_",
         "latest_name": "latestcrete.png",
         "remote_keep": 200,
