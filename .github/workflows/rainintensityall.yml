@@ -1,26 +1,27 @@
-name: rainintensityall
+name: Rain intensity ALL (manual)
 
 on:
   workflow_dispatch:
+
+concurrency:
+  group: rainintensityall
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   run:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
 
+    # Copy this env block from tnow.yml EXACTLY (same secret names)
     env:
-      TZ: Europe/Athens
-
-      # FTP secrets (already present in your log)
       FTP_HOST: ${{ secrets.FTP_HOST }}
       FTP_USER: ${{ secrets.FTP_USER }}
       FTP_PASS: ${{ secrets.FTP_PASS }}
-
-      # Feed URL(s) used by rainintensityall.py
-      CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
-      TXT_URL: ${{ secrets.TXT_URL }}
+      ASSETS_PASS: ${{ secrets.ASSETS_PASS }}
+      TZ: Europe/Athens
 
     steps:
       - name: Checkout
@@ -30,25 +31,46 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-          cache: pip
+          cache: "pip"
 
-      - name: System dependencies (GDAL/PROJ/GEOS)
+      - name: System dependencies (GDAL/GEOS/PROJ)
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            gdal-bin libgdal-dev \
-            proj-bin libproj-dev \
-            libgeos-dev \
-            python3-dev
+          sudo apt-get install -y gdal-bin libgdal-dev
 
-      - name: Install Python dependencies
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install numpy pandas geopandas shapely pyproj fiona matplotlib requests
+          fi
 
-      # If you have encrypted assets in other workflows, this is the place to add
-      # the same decrypt/unzip steps. For now we keep it off like your current run.
-      - name: Run rainintensityall.py
+      # Keep ONLY if your rain intensity scripts need the same encrypted assets as tnow.yml
+      - name: Decrypt assets (same as tnow.yml)
+        shell: bash
         run: |
+          set -euo pipefail
+          mkdir -p data
+
+          if [ -f "data/greece.geojson.enc" ]; then
+            openssl aes-256-cbc -pbkdf2 -d \
+              -in "data/greece.geojson.enc" \
+              -out "data/greece.geojson" \
+              -pass pass:"$ASSETS_PASS"
+          fi
+
+          if [ -f "data/altitude.zip.enc" ]; then
+            openssl aes-256-cbc -pbkdf2 -d \
+              -in "data/altitude.zip.enc" \
+              -out "data/altitude.zip" \
+              -pass pass:"$ASSETS_PASS"
+            unzip -o "data/altitude.zip" -d "data/"
+          fi
+
+      - name: Run ALL rain intensity pipeline
+        run: |
+          set -euo pipefail
+          # CHANGE THIS to your real entrypoint if different:
           python rainintensityall.py
