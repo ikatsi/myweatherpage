@@ -88,9 +88,16 @@ AT_LAT_MIN, AT_LAT_MAX = 37.5, 38.7
 AT_N = 300
 
 # --- Crete bbox (same EGSA approach as Attica) ---
+# --- Crete bbox (same EGSA approach as Attica) ---
 CR_LON_MIN, CR_LON_MAX = 23.0, 26.5
 CR_LAT_MIN, CR_LAT_MAX = 34.5, 36.0
 CR_N = 300
+
+# --- NE Greece bbox (EGSA approach like Attica/Crete) ---
+NE_LON_MIN, NE_LON_MAX = 22.0, 27.0
+NE_LAT_MIN, NE_LAT_MAX = 39.9, 42.0
+NE_N = 300
+
 
 
 # Fetch/retry
@@ -1203,6 +1210,177 @@ def make_tnow_crete_egsa(df, greece_gdf_wgs, dem_path, athens_now):
     return main_path, ts_path
 
 
+def make_tnow_negreece_egsa(df, greece_gdf_wgs, dem_path, athens_now):
+    if "TNow" not in df.columns:
+        print("❌ TNow missing.")
+        return (None, None)
+
+    tt0 = df.copy()
+    tt0["TNow"] = pd.to_numeric(tt0["TNow"], errors="coerce")
+    tt0.dropna(subset=["TNow", "Latitude", "Longitude"], inplace=True)
+    tt0 = tt0[~np.isclose(tt0["TNow"].to_numpy(dtype=float), SENTINEL_TEMP, atol=1e-6)]
+    if tt0.empty:
+        print("❌ No valid TNow data for NE Greece.")
+        return (None, None)
+
+    # Convert bbox corners to EGSA meters
+    corners_lon = [NE_LON_MIN, NE_LON_MIN, NE_LON_MAX, NE_LON_MAX]
+    corners_lat = [NE_LAT_MIN, NE_LAT_MAX, NE_LAT_MIN, NE_LAT_MAX]
+    cx, cy = WGS_TO_EGSA.transform(corners_lon, corners_lat)
+    x_min, x_max = float(np.min(cx)), float(np.max(cx))
+    y_min, y_max = float(np.min(cy)), float(np.max(cy))
+
+    # Stations projected to EGSA
+    st_lon = tt0["Longitude"].to_numpy(dtype=float)
+    st_lat = tt0["Latitude"].to_numpy(dtype=float)
+    st_t = tt0["TNow"].to_numpy(dtype=float)
+
+    st_x, st_y = WGS_TO_EGSA.transform(st_lon.tolist(), st_lat.tolist())
+    st_x = np.asarray(st_x, dtype=float)
+    st_y = np.asarray(st_y, dtype=float)
+
+    # Prefilter to nearby stations (buffer 200 km)
+    buf = 200_000.0
+    near = (st_x >= (x_min - buf)) & (st_x <= (x_max + buf)) & (st_y >= (y_min - buf)) & (st_y <= (y_max + buf))
+    st_lon = st_lon[near]
+    st_lat = st_lat[near]
+    st_t = st_t[near]
+    st_x = st_x[near]
+    st_y = st_y[near]
+
+    if len(st_t) < 8:
+        print("❌ Too few nearby stations for NE Greece interpolation.")
+        return (None, None)
+
+    # DEM altitude at stations (lon/lat sampling)
+    st_elev = sample_dem_lonlat(dem_path, st_lon, st_lat)
+
+    ok = np.isfinite(st_t) & np.isfinite(st_x) & np.isfinite(st_y) & np.isfinite(st_elev)
+    st_t = st_t[ok]
+    st_x = st_x[ok]
+    st_y = st_y[ok]
+    st_elev = st_elev[ok]
+
+    if len(st_t) < 8:
+        print("❌ Too few valid stations (after DEM) for NE Greece interpolation.")
+        return (None, None)
+
+    # Lapse per station (in meters space)
+    st_lapse = estimate_local_lapse_rates_egsa(st_x, st_y, st_t, st_elev)
+    st_t0 = st_t - (st_lapse * st_elev)
+
+    # Grid in EGSA meters
+    grid_x_m, grid_y_m = np.meshgrid(
+        np.linspace(x_min, x_max, NE_N),
+        np.linspace(y_min, y_max, NE_N)
+    )
+
+    # Interpolate t0 and lapse in meters
+    t0_grid = idw_fast(st_x, st_y, st_t0, grid_x_m, grid_y_m,
+                       k=AT_IDW_K, power=AT_IDW_POWER,
+                       max_distance=AT_MAX_DISTANCE_M, min_neighbors=AT_MIN_NEIGHBORS)
+
+    lapse_grid = idw_fast(st_x, st_y, st_lapse, grid_x_m, grid_y_m,
+                          k=AT_IDW_K, power=AT_IDW_POWER,
+                          max_distance=AT_MAX_DISTANCE_M, min_neighbors=AT_MIN_NEIGHBORS)
+
+    # DEM on grid: EGSA -> lon/lat -> sample
+    glon, glat = EGSA_TO_WGS.transform(grid_x_m.ravel().tolist(), grid_y_m.ravel().tolist())
+    grid_elev = sample_dem_lonlat(dem_path, np.array(glon, dtype=float), np.array(glat, dtype=float)).reshape(grid_x_m.shape)
+
+    t_grid = t0_grid + (lapse_grid * grid_elev)
+
+    # Greece boundary in EGSA and clipped to bbox
+    greece_egsa = greece_gdf_wgs.to_crs(CRS_EGSA87)
+    greece_clip = greece_egsa.cx[x_min:x_max, y_min:y_max].copy()
+
+    if hasattr(greece_clip.geometry, "union_all"):
+        boundary = greece_clip.geometry.union_all()
+    else:
+        boundary = greece_clip.geometry.unary_union
+
+    # Geo mask on grid (EGSA)
+    grid_pts = gpd.GeoDataFrame(
+        geometry=gpd.points_from_xy(grid_x_m.ravel(), grid_y_m.ravel()),
+        crs=CRS_EGSA87
+    )
+    geo_mask = grid_pts.geometry.within(boundary).values.reshape(grid_x_m.shape)
+
+    # Distance mask in meters
+    tree = cKDTree(np.c_[st_x, st_y])
+    d, _ = tree.query(np.c_[grid_x_m.ravel(), grid_y_m.ravel()])
+    dist_mask = (d.reshape(grid_x_m.shape) <= AT_DISTANCE_MASK_M)
+
+    final_mask = geo_mask & dist_mask & np.isfinite(grid_elev)
+
+    out = np.full(grid_x_m.shape, np.nan, dtype=float)
+    out[final_mask] = t_grid[final_mask]
+
+    # Plot in EGSA meters, ticks shown as lon/lat degrees
+    fig, ax = plt.subplots(figsize=(10, 10), dpi=300)
+
+    img = ax.imshow(
+        ma.masked_invalid(out),
+        extent=(x_min, x_max, y_min, y_max),
+        origin="lower",
+        cmap=TEMP_CMAP,
+        norm=TEMP_NORM,
+        alpha=0.95
+    )
+
+    greece_clip.boundary.plot(ax=ax, color="black", linewidth=0.6)
+
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_aspect("equal", adjustable="box")
+
+    y_ref_for_lon = y_min
+    x_ref_for_lat = x_min
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+
+    def fmt_lon(x, pos):
+        lon, _lat = EGSA_TO_WGS.transform(x, y_ref_for_lon)
+        return f"{lon:.2f}"
+
+    def fmt_lat(y, pos):
+        _lon, lat = EGSA_TO_WGS.transform(x_ref_for_lat, y)
+        return f"{lat:.2f}"
+
+    ax.xaxis.set_major_formatter(FuncFormatter(fmt_lon))
+    ax.yaxis.set_major_formatter(FuncFormatter(fmt_lat))
+
+    ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
+    ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
+
+    add_contours(ax, grid_x_m, grid_y_m, out)
+
+    cbar = fig.colorbar(img, ax=ax, orientation="vertical", extend="both",
+                        fraction=0.035, pad=0.02)
+    cbar.set_ticks([-25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30, 35, 40, 45])
+    cbar.set_label("Θερμοκρασία (°C)", fontsize=12)
+
+    ax.set_title("Τρέχουσα θερμοκρασία ΒΑ Ελλάδας (προσαρμογή υψομέτρου)", fontsize=16, pad=10)
+
+    ax.text(
+        0.01, 0.01, stamp_text(athens_now),
+        transform=ax.transAxes, fontsize=9, color="black",
+        ha="left", va="bottom",
+        bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.3"),
+        path_effects=[pe.withStroke(linewidth=2.0, foreground="white")]
+    )
+
+    main_path, ts_path = save_with_timestamp(fig, OUT_DIR, "tnow_negreece.png", athens_now)
+    plt.close(fig)
+
+    print("✅ Saved:", main_path)
+    if ts_path:
+        print("✅ Saved:", ts_path)
+
+    return main_path, ts_path
+
+
+
 def filter_fresh_rows(data: pd.DataFrame, athens_now: datetime, max_age_minutes: int = 60) -> pd.DataFrame:
     """
     Keep only rows with a valid Datetime and age <= max_age_minutes, using Athens timezone.
@@ -1285,15 +1463,19 @@ def main():
 
     # 1) Attica first
     att_main, att_ts = make_tnow_attica_egsa(data, greece, DEM_PATH, athens_now)
-
-    # 2) Crete second
+    
+    # 2) NE Greece second
+    ne_main, ne_ts = make_tnow_negreece_egsa(data, greece, DEM_PATH, athens_now)
+    
+    # 3) Crete third
     cr_main, cr_ts = make_tnow_crete_egsa(data, greece, DEM_PATH, athens_now)
-
-    # 3) Greece last (leave it as-is)
+    
+    # 4) Greece last (leave it as-is)
     gr_main, gr_ts = make_tnow_greece_wgs(data, greece, DEM_PATH, athens_now)
-
+    
     # Upload ONLY the stable filenames (keep timestamped copies local only)
-    for p in [att_main, cr_main, gr_main]:
+    for p in [att_main, ne_main, cr_main, gr_main]:
+
         if p and os.path.exists(p):
             try:
                 upload_to_ftp(p)
