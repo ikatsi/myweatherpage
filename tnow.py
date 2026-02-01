@@ -2,13 +2,15 @@
 # -*- coding: utf-8 -*-
 # tnow.py
 #
-# Produces SIX files (Attica first, then Crete, then Greece), ALL in ONE folder:  ./Tnowmaps/
+# Produces EIGHT files (Attica, NE Greece, Crete, Greece), ALL in ONE folder:  ./Tnowmaps/
 #   1) tnow_attica.png
 #   2) tnow_attica_YYYYMMDD_HHMM.png
-#   3) tnow_crete.png
-#   4) tnow_crete_YYYYMMDD_HHMM.png
-#   5) tnow.png
-#   6) tnow_YYYYMMDD_HHMM.png
+#   3) tnow_negreece.png
+#   4) tnow_negreece_YYYYMMDD_HHMM.png
+#   5) tnow_crete.png
+#   6) tnow_crete_YYYYMMDD_HHMM.png
+#   7) tnow.png
+#   8) tnow_YYYYMMDD_HHMM.png
 #
 # Attica map is done like
 # - Grid + interpolation + distance masks in EGSA87 (EPSG:2100 meters)
