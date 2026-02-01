@@ -67,10 +67,10 @@ jobs:
           rm -f altitude.zip
           ls -lh GRC_alt.*
 
-      - name: Run negreece.py
+      - name: Run rainintensitynegreece.py
         run: |
           python -V
-          python negreece.py
+          python rainintensitynegreece.py
 
       - name: Upload PNG artifacts
         if: always()
