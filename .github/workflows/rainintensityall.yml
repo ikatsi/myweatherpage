@@ -28,6 +28,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Sanity check encrypted assets exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -lh \
+            greece.geojson.enc \
+            altitude.zip.enc \
+            cyprus.geojson.enc \
+            cyprus.tif.enc
+
+      - name: Ensure unzip is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v unzip >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y unzip)
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -42,14 +58,18 @@ jobs:
             ${{ runner.os }}-pip-rainall-
 
       - name: Install Python deps
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install --only-binary=:all: \
             numpy pandas matplotlib scipy requests \
             rasterio shapely pyproj fiona geopandas pyogrio
 
       - name: Decrypt Greece GeoJSON
+        shell: bash
         run: |
+          set -euo pipefail
           test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
           test -f greece.geojson.enc || { echo "greece.geojson.enc missing"; exit 1; }
           openssl enc -d -aes-256-cbc -pbkdf2 \
@@ -59,7 +79,9 @@ jobs:
           ls -lh greece.geojson
 
       - name: Decrypt Greece altitude bundle (altitude.zip.enc)
+        shell: bash
         run: |
+          set -euo pipefail
           test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
           test -f altitude.zip.enc || { echo "altitude.zip.enc missing"; exit 1; }
           openssl enc -d -aes-256-cbc -pbkdf2 \
@@ -72,7 +94,9 @@ jobs:
           ls -lh GRC_alt.vrt
 
       - name: Decrypt Cyprus GeoJSON
+        shell: bash
         run: |
+          set -euo pipefail
           test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
           test -f cyprus.geojson.enc || { echo "cyprus.geojson.enc missing"; exit 1; }
           openssl enc -d -aes-256-cbc -pbkdf2 \
@@ -82,7 +106,9 @@ jobs:
           ls -lh cyprus.geojson
 
       - name: Decrypt Cyprus altitude GeoTIFF
+        shell: bash
         run: |
+          set -euo pipefail
           test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
           test -f cyprus.tif.enc || { echo "cyprus.tif.enc missing"; exit 1; }
           openssl enc -d -aes-256-cbc -pbkdf2 \
@@ -92,7 +118,9 @@ jobs:
           ls -lh cyprus_dsm_90m.tif
 
       - name: Run rainintensityall.py (all regions)
+        shell: bash
         run: |
+          set -euo pipefail
           python -V
           python rainintensityall.py --region all
 
