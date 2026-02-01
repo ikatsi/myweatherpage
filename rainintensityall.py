@@ -1933,7 +1933,7 @@ EGSA_REGIONS = {
     },
     "negreece": {
         "name": "NE Greece",
-        "bbox": (22.0, 26.6, 39.8, 41.9),
+        "bbox": (22.0, 26.6, 39.7, 41.8),
         "prefix": "rain_intensity_negreece_",
         "latest_name": "latestnegreece.png",
         "remote_keep": 200,
