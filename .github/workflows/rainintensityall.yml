@@ -1,0 +1,63 @@
+name: rainintensityall
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: rainintensityall
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      TZ: Europe/Athens
+
+      # Same secret names pattern as your other workflows
+      FTP_HOST: ${{ secrets.FTP_HOST }}
+      FTP_USER: ${{ secrets.FTP_USER }}
+      FTP_PASS: ${{ secrets.FTP_PASS }}
+
+      # Keep if your script reads it from env (harmless if unused)
+      TXT_URL: ${{ secrets.TXT_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install system packages (GDAL stack)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gdal-bin \
+            libgdal-dev \
+            python3-dev \
+            build-essential
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install numpy pandas matplotlib geopandas shapely pyproj fiona rasterio scipy requests
+          fi
+
+      # If your other workflows decrypt assets (geojson, altitude, etc.), paste that same decrypt block here.
+      # I am leaving it as a no-op placeholder so this file matches the "manual trigger only" requirement
+      # without guessing your exact decrypt commands/secret names.
+      - name: Assets (if any)
+        run: |
+          echo "No decrypt step configured in this workflow."
+
+      - name: Run rainintensityall.py
+        run: |
+          python rainintensityall.py
