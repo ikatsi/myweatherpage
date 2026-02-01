@@ -200,6 +200,7 @@ def prettify_station_name(s: str) -> str:
     if s is None:
         return "–"
     s = str(s).strip()
+    s = s.replace("Ιερά Μονή", "Ι.Μ.")
     s = s.replace("Μητροπολιτικό Πάρκο", "Πάρκο")
     s = s.replace("Διεθνές Αεροδρόμιο", "Α/Δ")
     s = s.replace("Αεροδρόμιο", "Α/Δ")
