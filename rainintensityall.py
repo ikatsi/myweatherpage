@@ -84,6 +84,16 @@ FTP_PASS = os.environ.get("FTP_PASS", "").strip()
 def ftp_enabled():
     return bool(FTP_HOST and FTP_USER and FTP_PASS)
 
+def transparent_bbox(pad=0.3, rounded=True):
+    """
+    Fully transparent text bbox (no fill, no border), but keeps the padding/shape.
+    """
+    boxstyle = ("round,pad=" + str(pad)) if rounded else ("square,pad=" + str(pad))
+    return dict(
+        facecolor=(1, 1, 1, 0.0),  # transparent fill
+        edgecolor=(0, 0, 0, 0.0),  # transparent border
+        boxstyle=boxstyle,
+    )
 
 def fmt_data_until(dtval) -> str:
     """
@@ -107,6 +117,18 @@ def fmt_data_until(dtval) -> str:
             return dtval.strftime("%Y-%m-%d %H:%M")
         except Exception:
             return "—"
+
+
+def athens_abbrev(dt: datetime) -> str:
+    """
+    Returns EET or EEST for Athens time, reliably.
+    """
+    try:
+        dt_ath = dt.astimezone(ATHENS_TZ)
+        is_dst = bool(dt_ath.dst()) and dt_ath.dst() != timedelta(0)
+        return "EEST" if is_dst else "EET"
+    except Exception:
+        return "EET"
 
 
 def ftps_connect_with_retries(host, user, passwd, attempts=6, base_sleep=5, timeout=60):
@@ -1143,7 +1165,7 @@ def run_greece():
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
-    timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M %Z")
+    timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M") + f" {athens_abbrev(athens_now)}"
     left_text = f"Δημιουργήθηκε για το e-kairos.gr\n{timestamp_text}\nμε δεδομένα έως και {data_until_str}"
     right_text = f"v4.0-local\nΧιονόπτωση ≤ {SNOW_T_C:.1f}°C\nΣυνολ. βαροβαθμιδα: {b_global*1000:.2f} °C/km"
 
@@ -1154,7 +1176,7 @@ def run_greece():
         color="black",
         ha="left",
         va="bottom",
-        bbox=dict(facecolor="white", edgecolor="none", boxstyle="round,pad=0.3")
+        bbox=transparent_bbox(pad=0.3, rounded=True)
     )
     ax.text(
         0.99, 0.01, right_text,
@@ -1163,7 +1185,7 @@ def run_greece():
         color="black",
         ha="right",
         va="bottom",
-        bbox=dict(facecolor="white", edgecolor="none", boxstyle="round,pad=0.3")
+        bbox=transparent_bbox(pad=0.3, rounded=True)
     )
 
     plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
@@ -1483,8 +1505,8 @@ def run_egsa_region(cfg: dict):
     ax.set_title("Υπολογ. τελευταία διαθέσιμη ραγδαιότητα υετού", fontsize=14, pad=10, loc="center")
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
-    timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M %Z")
-    left_text = f"Δημιουργήθηκε για το e-kairos.gr\n{timestamp_text}"
+    timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M") + f" {athens_abbrev(athens_now)}"
+    left_text = f"Δημιουργήθηκε για το e-kairos.gr\n{timestamp_text}\nμε δεδομένα έως και {fmt_data_until(df['Datetime'].max())}"
     right_text = f"{cfg.get('footer_version','v4.x-egsa2100')}\nΧιονόπτωση ≤ {SNOW_T_C:.1f}°C\nΣυνολ. βαροβαθμιδα: {b_global*1000:.2f} °C/km"
 
     ax.text(
@@ -1494,7 +1516,7 @@ def run_egsa_region(cfg: dict):
         color="black",
         ha="left",
         va="bottom",
-        bbox=dict(facecolor="white", edgecolor="none", boxstyle="round,pad=0.3")
+        bbox=transparent_bbox(pad=0.3, rounded=True)
     )
     ax.text(
         0.99, 0.01, right_text,
@@ -1503,7 +1525,7 @@ def run_egsa_region(cfg: dict):
         color="black",
         ha="right",
         va="bottom",
-        bbox=dict(facecolor="white", edgecolor="none", boxstyle="round,pad=0.3")
+        bbox=transparent_bbox(pad=0.3, rounded=True)
     )
 
     plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
@@ -1865,7 +1887,7 @@ def run_cyprus():
     ax.set_title("Υπολογ. τελευταία διαθέσιμη ραγδαιότητα υετού", fontsize=14, pad=10, loc="center")
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
-    timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M %Z")
+    timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M") + f" {athens_abbrev(athens_now)}"
     left_text = f"Δημιουργήθηκε για το e-kairos.gr\n{timestamp_text}\nμε δεδομένα έως και {data_until_str}"
     
     ax.text(
@@ -1874,7 +1896,7 @@ def run_cyprus():
         fontsize=10,
         color="black",
         ha="left", va="bottom",
-        bbox=dict(facecolor="white", edgecolor="none", boxstyle="round,pad=0.3")
+        bbox=transparent_bbox(pad=0.3, rounded=True)
     )
 
     lapse_text = f"Lapse: {lapse*1000:.2f} °C/km | Snow labels: T≤{SNOW_T_C:.1f}°C"
@@ -1884,8 +1906,9 @@ def run_cyprus():
         fontsize=10,
         color="black",
         ha="right", va="bottom",
-        bbox=dict(facecolor="white", edgecolor="none", boxstyle="round,pad=0.3")
+        bbox=transparent_bbox(pad=0.3, rounded=True)
     )
+
 
     plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
 
