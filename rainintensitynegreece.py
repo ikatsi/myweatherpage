@@ -77,8 +77,8 @@ CRS_EGSA87 = "EPSG:2100"
 
 # Area of interest in lon/lat (degrees); converted internally to EGSA meters
 GRID_N = 300
-GRID_LON_MIN, GRID_LON_MAX = 22.0, 27.0
-GRID_LAT_MIN, GRID_LAT_MAX = 39.85, 42.0
+GRID_LON_MIN, GRID_LON_MAX = 22.0, 26.6
+GRID_LAT_MIN, GRID_LAT_MAX = 39.8, 41.9
 
 # IDW settings (meters)
 IDW_POWER = 2
