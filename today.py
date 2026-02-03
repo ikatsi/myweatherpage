@@ -55,6 +55,7 @@ import rasterio
 # =========================
 
 EXCLUDE_TMAX_WEBCODES = {"hua_ilion", "hua_argyroupoli"}
+EXCLUDE_PPN_WEBCODES = {"pws2_chalkida"}
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__) or ".")
 
@@ -916,11 +917,21 @@ def main():
     today_data = data[data["Datetime"] >= today_start].copy()
 
     if "webcode" in today_data.columns:
-        wc = today_data["webcode"].astype(str)
+        wc = (
+            today_data["webcode"].astype(str)
+            .str.replace("\ufeff", "", regex=False)
+            .str.replace("ï»¿", "", regex=False)
+            .str.strip()
+            .str.lower()
+        )
+
+        exclude_ppn = {w.strip().lower() for w in EXCLUDE_PPN_WEBCODES}
+
         mask = (
             ~wc.str.match(r"(?i)^wu_lefkaditi$", na=False) &
             ~wc.str.match(r"(?i)^age_klimamilou$", na=False) &
-            ~wc.str.match(r"(?i)^uoi_", na=False)
+            ~wc.str.match(r"(?i)^uoi_", na=False) &
+            ~wc.isin(exclude_ppn)
         )
         today_data = today_data[mask].copy()
 
