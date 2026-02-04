@@ -761,7 +761,20 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     out[final_mask] = t_grid[final_mask]
 
     # =========================
-    # NEW: % of territory (modelled) with air frost (T <= 0°C)
+    # NEW: interpolated Tmin/Tmax over modelled (masked) territory
+    # =========================
+    interp_min = None
+    interp_max = None
+    try:
+        vals = out[final_mask]
+        if vals.size > 0:
+            interp_min = float(np.nanmin(vals))
+            interp_max = float(np.nanmax(vals))
+    except Exception:
+        interp_min, interp_max = None, None
+
+    # =========================
+    # % of territory (modelled) with air frost (T <= 0°C)
     # Shown ONLY if the rounded-to-2-decimals value is > 0.00%
     # Text is forced to NOT be a single line (newline inserted).
     # =========================
@@ -775,6 +788,7 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
                 frost_text = f"{frost_pct:.1f}% της επικράτειας\nμε παγετό αέρα"
     except Exception:
         frost_text = ""
+
 
     fig, ax = plt.subplots(figsize=(12, 8))
     img = ax.imshow(
@@ -791,6 +805,20 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     _temp_colorbar(ax, img)
 
     ax.set_title("Τρέχουσα θερμοκρασία (προσαρμογή υψομέτρου)", fontsize=16)
+
+    # NEW: print interpolated min/max on the PNG (over modelled territory)
+    if interp_min is not None and interp_max is not None:
+        mm_text = "Εύρος παρεμβολής (ξηρά):\n{0:.1f} έως {1:.1f}°C".format(interp_min, interp_max)
+        ax.text(
+            0.01, 0.985, mm_text,
+            transform=ax.transAxes,
+            ha="left", va="top",
+            fontsize=11,
+            color="black",
+            bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.2"),
+            path_effects=[pe.withStroke(linewidth=3.0, foreground="white")]
+        )
+
     ax.set_xlabel("Γεωγρ. μήκος", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
 
