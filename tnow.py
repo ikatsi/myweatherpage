@@ -56,6 +56,8 @@ from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 
 from scipy.spatial import cKDTree
+from scipy.ndimage import gaussian_filter
+
 import requests
 import rasterio
 from pyproj import Transformer
@@ -423,6 +425,98 @@ def idw_fast(x, y, z, xi, yi, k=8, power=2, max_distance=1.0, min_neighbors=3):
     zi[ok_pts] = zi_ok[ok_pts]
     return zi.reshape(xi.shape)
 
+def max_adjusted_neighbors_wgs(st_lons, st_lats, st_temp, st_elev, st_lapse,
+                               grid_x, grid_y, grid_elev,
+                               k=8, max_deg=1.2, min_neighbors=3):
+    """
+    For each grid cell, take MAX over nearby stations of:
+      T_i + lapse_i * (z_cell - z_i)
+
+    This is an "upper envelope" field, not a mean estimator.
+    Can exceed observed station maxima (especially downslope).
+    """
+    st_lons = np.asarray(st_lons, dtype=float)
+    st_lats = np.asarray(st_lats, dtype=float)
+    st_temp = np.asarray(st_temp, dtype=float)
+    st_elev = np.asarray(st_elev, dtype=float)
+    st_lapse = np.asarray(st_lapse, dtype=float)
+
+    tree = cKDTree(np.c_[st_lons, st_lats])
+
+    pts = np.c_[grid_x.ravel(), grid_y.ravel()]
+    dist, idx = tree.query(pts, k=min(k, len(st_temp)), distance_upper_bound=max_deg)
+
+    if dist.ndim == 1:
+        dist = dist[:, None]
+        idx = idx[:, None]
+
+    finite = np.isfinite(dist) & (idx < len(st_temp))
+    neigh_count = np.sum(finite, axis=1)
+
+    out = np.full(grid_x.size, np.nan, dtype=float)
+    ok_pts = neigh_count >= min_neighbors
+    if not np.any(ok_pts):
+        return out.reshape(grid_x.shape)
+
+    idx_safe = np.where(finite, idx, 0)
+
+    # expand grid elevation to match neighbors
+    zc = grid_elev.ravel()[:, None]
+    ti = st_temp[idx_safe]
+    zi = st_elev[idx_safe]
+    li = st_lapse[idx_safe]
+
+    t_adj = ti + li * (zc - zi)
+    t_adj = np.where(finite, t_adj, np.nan)
+
+    out[ok_pts] = np.nanmax(t_adj[ok_pts], axis=1)
+    return out.reshape(grid_x.shape)
+
+def min_adjusted_neighbors_wgs(st_lons, st_lats, st_temp, st_elev, st_lapse,
+                               grid_x, grid_y, grid_elev,
+                               k=8, max_deg=1.2, min_neighbors=3):
+    """
+    For each grid cell, take MIN over nearby stations of:
+      T_i + lapse_i * (z_cell - z_i)
+
+    This is a "lower envelope" field, not a mean estimator.
+    Can be colder than observed station minima (especially if inversions/cold pools are plausible).
+    """
+    st_lons = np.asarray(st_lons, dtype=float)
+    st_lats = np.asarray(st_lats, dtype=float)
+    st_temp = np.asarray(st_temp, dtype=float)
+    st_elev = np.asarray(st_elev, dtype=float)
+    st_lapse = np.asarray(st_lapse, dtype=float)
+
+    tree = cKDTree(np.c_[st_lons, st_lats])
+
+    pts = np.c_[grid_x.ravel(), grid_y.ravel()]
+    dist, idx = tree.query(pts, k=min(k, len(st_temp)), distance_upper_bound=max_deg)
+
+    if dist.ndim == 1:
+        dist = dist[:, None]
+        idx = idx[:, None]
+
+    finite = np.isfinite(dist) & (idx < len(st_temp))
+    neigh_count = np.sum(finite, axis=1)
+
+    out = np.full(grid_x.size, np.nan, dtype=float)
+    ok_pts = neigh_count >= min_neighbors
+    if not np.any(ok_pts):
+        return out.reshape(grid_x.shape)
+
+    idx_safe = np.where(finite, idx, 0)
+
+    zc = grid_elev.ravel()[:, None]
+    ti = st_temp[idx_safe]
+    zi = st_elev[idx_safe]
+    li = st_lapse[idx_safe]
+
+    t_adj = ti + li * (zc - zi)
+    t_adj = np.where(finite, t_adj, np.nan)
+
+    out[ok_pts] = np.nanmin(t_adj[ok_pts], axis=1)
+    return out.reshape(grid_x.shape)
 
 # =========================
 # DEM SAMPLING (lon/lat arrays)
@@ -707,13 +801,77 @@ def estimate_local_lapse_rates_wgs(st_lons, st_lats, st_temp, st_elev,
     return lapses
 
 
+def in_night_coldpool_window(athens_now: datetime) -> bool:
+    # True Greek time (Europe/Athens): 22:00–08:30, wrapping midnight
+    t = athens_now.time()
+    return (t >= datetime.strptime("22:00", "%H:%M").time()) or (t <= datetime.strptime("08:30", "%H:%M").time())
+
+def wind_factor_kph(w_kph: np.ndarray, calm_kph: float = 5.0, fade_kph: float = 15.0) -> np.ndarray:
+    """
+    1.0 when wind <= calm_kph
+    0.0 when wind >= fade_kph
+    linear taper in between
+    """
+    w = np.asarray(w_kph, dtype=float)
+    f = np.ones_like(w, dtype=float)
+    f[w >= fade_kph] = 0.0
+    mid = (w > calm_kph) & (w < fade_kph)
+    f[mid] = (fade_kph - w[mid]) / (fade_kph - calm_kph)
+    f = np.clip(f, 0.0, 1.0)
+    return f
+
+def rh_clear_proxy_factor(rh: np.ndarray, rh_full: float = 85.0, rh_zero: float = 95.0) -> np.ndarray:
+    """
+    Optional: suppress cold-pool cooling when RH is high (fog/stratus risk).
+    1.0 when RH <= rh_full, 0.0 when RH >= rh_zero, linear in between.
+    """
+    r = np.asarray(rh, dtype=float)
+    f = np.ones_like(r, dtype=float)
+    f[r >= rh_zero] = 0.0
+    mid = (r > rh_full) & (r < rh_zero)
+    f[mid] = (rh_zero - r[mid]) / (rh_zero - rh_full)
+    f = np.clip(f, 0.0, 1.0)
+    return f
+
+def coldpool_depression_m(grid_elev: np.ndarray, dx_km: float, dy_km: float,
+                          radius_km: float = 20.0) -> np.ndarray:
+    """
+    Depression proxy: local-mean elevation minus elevation.
+    Positive -> cell is below its surroundings (valleys/basins).
+    """
+    # Convert radius to gaussian sigma in pixels (approx)
+    px = max(1.0, radius_km / max(dx_km, 1e-6))
+    py = max(1.0, radius_km / max(dy_km, 1e-6))
+
+    # Smooth elevation to get local mean
+    z = np.asarray(grid_elev, dtype=float)
+    z_mean = gaussian_filter(z, sigma=(py, px), mode="nearest")
+
+    dep = z_mean - z
+    dep = np.clip(dep, 0.0, 400.0)  # cap: don’t allow insane “basins”
+    return dep
+
+def coldpool_extra_cooling_c(dep_m: np.ndarray,
+                             k_c_per_100m: float = 1.2) -> np.ndarray:
+    """
+    Convert depression depth to extra cooling.
+    Example: 1.2°C per 100 m depression (tunable).
+    """
+    return (k_c_per_100m / 100.0) * np.asarray(dep_m, dtype=float)
+
 def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     if "TNow" not in df.columns:
         print("❌ TNow missing.")
         return (None, None)
 
     tt0 = df.copy()
+
     tt0["TNow"] = pd.to_numeric(tt0["TNow"], errors="coerce")
+    if "WindSpeedNow" in tt0.columns:
+        tt0["WindSpeedNow"] = pd.to_numeric(tt0["WindSpeedNow"], errors="coerce")
+    if "RHNow" in tt0.columns:
+        tt0["RHNow"] = pd.to_numeric(tt0["RHNow"], errors="coerce")
+
     tt0.dropna(subset=["TNow", "Latitude", "Longitude"], inplace=True)
     tt0 = tt0[~np.isclose(tt0["TNow"].to_numpy(dtype=float), SENTINEL_TEMP, atol=1e-6)]
     if tt0.empty:
@@ -730,6 +888,8 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     st_lons = tt0["Longitude"].to_numpy(dtype=float)
     st_lats = tt0["Latitude"].to_numpy(dtype=float)
     st_t = tt0["TNow"].to_numpy(dtype=float)
+    st_w = tt0["WindSpeedNow"].to_numpy(dtype=float) if "WindSpeedNow" in tt0.columns else None
+    st_rh = tt0["RHNow"].to_numpy(dtype=float) if "RHNow" in tt0.columns else None
 
     st_elev = sample_dem_lonlat(dem_path, st_lons, st_lats)
 
@@ -738,6 +898,10 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     st_lats = st_lats[ok]
     st_t = st_t[ok]
     st_elev = st_elev[ok]
+    if st_w is not None:
+        st_w = st_w[ok]
+    if st_rh is not None:
+        st_rh = st_rh[ok]
 
     if len(st_t) < 5:
         print("❌ Too few stations for Greece interpolation.")
@@ -754,19 +918,79 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     grid_elev = sample_dem_lonlat(dem_path, grid_x.ravel(), grid_y.ravel()).reshape(grid_x.shape)
     t_grid = t0_grid + (lapse_grid * grid_elev)
 
-    dist_mask = build_distance_mask(grid_x, grid_y, st_lons, st_lats, max_dist=1.5)
+    hot_grid = max_adjusted_neighbors_wgs(
+        st_lons, st_lats, st_t, st_elev, st_lapse,
+        grid_x, grid_y, grid_elev,
+        k=8, max_deg=1.2, min_neighbors=3
+    )
+
+    cold_grid = min_adjusted_neighbors_wgs(
+        st_lons, st_lats, st_t, st_elev, st_lapse,
+        grid_x, grid_y, grid_elev,
+        k=8, max_deg=1.2, min_neighbors=3
+    )
+
+    dist_mask = build_distance_mask(grid_x, grid_y, st_lons, st_lats, max_dist=0.8)
     final_mask = geo_mask & dist_mask & np.isfinite(grid_elev)
 
     out = np.full(grid_x.shape, np.nan, dtype=float)
     out[final_mask] = t_grid[final_mask]
 
+    out_hot = np.full(grid_x.shape, np.nan, dtype=float)
+    out_hot[final_mask] = hot_grid[final_mask]
+
+    out_cold = np.full(grid_x.shape, np.nan, dtype=float)
+    out_cold[final_mask] = cold_grid[final_mask]
+
     # =========================
-    # NEW: interpolated Tmin/Tmax over modelled (masked) territory
+    # COLD-POCKET ADJUSTMENT (22:00–08:30 Athens time, calm winds only)
+    # =========================
+    out_adj = out.copy()
+
+    if in_night_coldpool_window(athens_now):
+        base_night = np.full_like(out, np.nan, dtype=float)
+        base_night[final_mask] = np.minimum(out[final_mask], out_cold[final_mask])
+
+        dlon = (GR_LON_MAX - GR_LON_MIN) / max(GR_N - 1, 1)
+        dlat = (GR_LAT_MAX - GR_LAT_MIN) / max(GR_N - 1, 1)
+        lat0 = 0.5 * (GR_LAT_MIN + GR_LAT_MAX)
+        dx_km = 111.32 * np.cos(np.deg2rad(lat0)) * dlon
+        dy_km = 111.32 * dlat
+
+        dep = coldpool_depression_m(grid_elev, dx_km=dx_km, dy_km=dy_km, radius_km=20.0)
+        extra = coldpool_extra_cooling_c(dep, k_c_per_100m=1.2)
+
+        # Wind gating is REQUIRED (you asked "only for calm hours")
+        gate_wind = np.zeros_like(out, dtype=float)
+        if st_w is not None:
+            ok_w = np.isfinite(st_w)
+            if np.sum(ok_w) >= 5:
+                w_grid = idw_fast(st_lons[ok_w], st_lats[ok_w], st_w[ok_w],
+                                  grid_x, grid_y, k=8, power=2, max_distance=1.2, min_neighbors=3)
+                gate_wind = wind_factor_kph(w_grid, calm_kph=5.0, fade_kph=15.0)
+
+        # Optional RH gating (only if RHNow exists and enough values)
+        gate_rh = np.ones_like(out, dtype=float)
+        if st_rh is not None:
+            ok_rh = np.isfinite(st_rh)
+            if np.sum(ok_rh) >= 5:
+                rh_grid = idw_fast(st_lons[ok_rh], st_lats[ok_rh], st_rh[ok_rh],
+                                   grid_x, grid_y, k=8, power=2, max_distance=1.2, min_neighbors=3)
+                gate_rh = rh_clear_proxy_factor(rh_grid, rh_full=85.0, rh_zero=95.0)
+
+        gate = gate_wind * gate_rh
+        extra_eff = extra * gate
+
+        out_adj = base_night.copy()
+        out_adj[final_mask] = out_adj[final_mask] - extra_eff[final_mask]
+
+    # =========================
+    # MIN/MAX AFTER ALL ADJUSTMENTS
     # =========================
     interp_min = None
     interp_max = None
     try:
-        vals = out[final_mask]
+        vals = out_adj[final_mask]
         if vals.size > 0:
             interp_min = float(np.nanmin(vals))
             interp_max = float(np.nanmax(vals))
@@ -774,25 +998,22 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
         interp_min, interp_max = None, None
 
     # =========================
-    # % of territory (modelled) with air frost (T <= 0°C)
-    # Shown ONLY if the rounded-to-2-decimals value is > 0.00%
-    # Text is forced to NOT be a single line (newline inserted).
+    # FROST % AFTER ALL ADJUSTMENTS
     # =========================
     frost_text = ""
     try:
         denom = float(np.sum(final_mask))
         if denom > 0:
-            frost_cells = np.sum(final_mask & (out <= 0.0))
+            frost_cells = np.sum(final_mask & (out_adj <= 0.0))
             frost_pct = 100.0 * float(frost_cells) / denom
             if round(frost_pct, 2) > 0.0:
                 frost_text = f"{frost_pct:.1f}% της επικράτειας\nμε παγετό αέρα"
     except Exception:
         frost_text = ""
 
-
     fig, ax = plt.subplots(figsize=(12, 8))
     img = ax.imshow(
-        ma.masked_invalid(out),
+        ma.masked_invalid(out_adj),
         extent=(GR_LON_MIN, GR_LON_MAX, GR_LAT_MIN, GR_LAT_MAX),
         origin="lower",
         cmap=TEMP_CMAP,
@@ -801,12 +1022,11 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     )
 
     greece_gdf_wgs.boundary.plot(ax=ax, color="black", linewidth=0.6)
-    add_contours(ax, grid_x, grid_y, out)
+    add_contours(ax, grid_x, grid_y, out_adj)
     _temp_colorbar(ax, img)
 
     ax.set_title("Τρέχουσα θερμοκρασία (προσαρμογή υψομέτρου)", fontsize=16)
 
-    # NEW: print interpolated min/max on the PNG (over modelled territory)
     if interp_min is not None and interp_max is not None:
         mm_text = "Εύρος παρεμβολής (ξηρά):\n{0:.1f} έως {1:.1f}°C".format(interp_min, interp_max)
         ax.text(
@@ -832,7 +1052,6 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
         path_effects=[pe.withStroke(linewidth=3.0, foreground="white")]
     )
 
-
     main_path, ts_path = save_with_timestamp(fig, OUT_DIR, "tnow.png", athens_now)
     plt.close(fig)
 
@@ -841,6 +1060,7 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
         print("✅ Saved:", ts_path)
 
     return main_path, ts_path
+
 
 
 # =========================
@@ -1417,13 +1637,7 @@ def filter_fresh_rows(data: pd.DataFrame, athens_now: datetime, max_age_minutes:
         return data
 
     d = data.copy()
-    d["Datetime"] = pd.to_datetime(d["Datetime"], errors="coerce")
-
-    # Ensure Datetime is timezone-aware Athens
-    if getattr(d["Datetime"].dt, "tz", None) is None:
-        d["Datetime"] = d["Datetime"].dt.tz_localize("Europe/Athens", ambiguous="NaT", nonexistent="shift_forward")
-    else:
-        d["Datetime"] = d["Datetime"].dt.tz_convert("Europe/Athens")
+    d["Datetime"] = pd.to_datetime(d["Datetime"], errors="coerce", utc=True).dt.tz_convert("Europe/Athens")
 
     # Age in minutes
     delta = athens_now - d["Datetime"]
@@ -1459,7 +1673,7 @@ def main():
         print("❌ Datetime column missing. Parsed columns:", list(data.columns))
         raise SystemExit(1)
 
-    for col in ["Latitude", "Longitude", "TNow"]:
+    for col in ["Latitude", "Longitude", "TNow", "WindSpeedNow", "RHNow"]:
         if col in data.columns:
             data[col] = pd.to_numeric(data[col], errors="coerce")
 
