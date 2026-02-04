@@ -1631,23 +1631,31 @@ def make_tnow_negreece_egsa(df, greece_gdf_wgs, dem_path, athens_now):
 def filter_fresh_rows(data: pd.DataFrame, athens_now: datetime, max_age_minutes: int = 60) -> pd.DataFrame:
     """
     Keep only rows with a valid Datetime and age <= max_age_minutes, using Athens timezone.
-    Also drops rows that appear "too far in the future" (clock issues).
+    Assumes feed timestamps are Athens local time (naive).
     """
     if "Datetime" not in data.columns:
         return data
 
     d = data.copy()
-    d["Datetime"] = pd.to_datetime(d["Datetime"], errors="coerce", utc=True).dt.tz_convert("Europe/Athens")
 
-    # Age in minutes
+    dt = pd.to_datetime(d["Datetime"], errors="coerce")
+
+    # If timestamps are naive (no timezone), assume they are Athens local time
+    if dt.dt.tz is None:
+        dt = dt.dt.tz_localize("Europe/Athens", nonexistent="shift_forward", ambiguous="NaT")
+    else:
+        dt = dt.dt.tz_convert("Europe/Athens")
+
+    d["Datetime"] = dt
+
     delta = athens_now - d["Datetime"]
     age_min = delta.dt.total_seconds() / 60.0
 
-    # Keep only: not NaT, not negative (future), and <= max_age_minutes
     d = d[d["Datetime"].notna()]
     d = d[(age_min >= 0.0) & (age_min <= float(max_age_minutes))]
 
     return d
+
 
 
 # =========================
@@ -1682,7 +1690,7 @@ def main():
     data = data[data["Longitude"] <= 30]
 
     # Parse Datetime (timezone handling is done inside filter_fresh_rows)
-    data["Datetime"] = pd.to_datetime(data["Datetime"], errors="coerce")
+    # data["Datetime"] = pd.to_datetime(data["Datetime"], errors="coerce")
 
     if data.empty:
         print("❌ No usable rows after cleaning.")
