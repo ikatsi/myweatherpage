@@ -1075,25 +1075,6 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
             path_effects=[pe.withStroke(linewidth=3.0, foreground="white")]
         )
 
-    # --- bottom-right note for where the extremes occur
-    if (min_lonlat is not None) and (max_lonlat is not None):
-        coord_text = (
-            "Συντεταγμένες ακραίων (lon,lat):\n"
-            "min: {0:.3f}, {1:.3f}\n"
-            "max: {2:.3f}, {3:.3f}"
-        ).format(min_lonlat[0], min_lonlat[1], max_lonlat[0], max_lonlat[1])
-
-        ax.text(
-            0.99, 0.01, coord_text,
-            transform=ax.transAxes,
-            ha="right", va="bottom",
-            fontsize=7,
-            color="black",
-            bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.2"),
-            path_effects=[pe.withStroke(linewidth=2.0, foreground="white")]
-        )
-
-
     ax.set_xlabel("Γεωγρ. μήκος", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
 
