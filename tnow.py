@@ -985,22 +985,50 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
         out_adj[final_mask] = out_adj[final_mask] - extra_eff[final_mask]
 
     # =========================
-    # MIN/MAX FOR TEXT ONLY (MOST EXTREME VALUES), MAP UNCHANGED
-    #   min: lowest of out, out_cold, out_adj (cold pockets included via out_adj)
-    #   max: highest of out, out_hot, out_adj
+    # MIN/MAX FOR TEXT ONLY (MOST EXTREME VALUES) + LOCATIONS (lon/lat)
+    #   min: lowest of out, out_cold, out_adj
+    #   max: highest of out, out_hot,  out_adj
     # =========================
     interp_min = None
     interp_max = None
-    try:
-        vals_out  = out[final_mask]
-        vals_cold = out_cold[final_mask]
-        vals_hot  = out_hot[final_mask]
-        vals_adj  = out_adj[final_mask]
+    min_lonlat = None
+    max_lonlat = None
     
-        interp_min = float(np.nanmin([np.nanmin(vals_out), np.nanmin(vals_cold), np.nanmin(vals_adj)]))
-        interp_max = float(np.nanmax([np.nanmax(vals_out), np.nanmax(vals_hot),  np.nanmax(vals_adj)]))
+    try:
+        # Candidate fields for min/max (as full grids)
+        min_fields = [out, out_cold, out_adj]
+        max_fields = [out, out_hot,  out_adj]
+    
+        # Build a "masked candidates" stack so argmin/argmax works in 2D
+        def _masked(arr):
+            a = np.asarray(arr, dtype=float)
+            # outside final_mask -> nan
+            a = np.where(final_mask, a, np.nan)
+            return a
+
+        min_stack = np.stack([_masked(a) for a in min_fields], axis=0)  # (k, ny, nx)
+        max_stack = np.stack([_masked(a) for a in max_fields], axis=0)
+
+        interp_min = float(np.nanmin(min_stack))
+        interp_max = float(np.nanmax(max_stack))
+
+        # --- coordinates of absolute min
+        if np.isfinite(interp_min):
+            kk, yy, xx = np.unravel_index(np.nanargmin(min_stack), min_stack.shape)
+            min_lon = float(grid_x[yy, xx])
+            min_lat = float(grid_y[yy, xx])
+            min_lonlat = (min_lon, min_lat)
+
+        # --- coordinates of absolute max
+        if np.isfinite(interp_max):
+            kk, yy, xx = np.unravel_index(np.nanargmax(max_stack), max_stack.shape)
+            max_lon = float(grid_x[yy, xx])
+            max_lat = float(grid_y[yy, xx])
+            max_lonlat = (max_lon, max_lat)
+    
     except Exception:
         interp_min, interp_max = None, None
+        min_lonlat, max_lonlat = None, None
 
 
 
@@ -1046,6 +1074,25 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
             bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.2"),
             path_effects=[pe.withStroke(linewidth=3.0, foreground="white")]
         )
+
+    # --- bottom-right note for where the extremes occur
+    if (min_lonlat is not None) and (max_lonlat is not None):
+        coord_text = (
+            "Συντεταγμένες ακραίων (lon,lat):\n"
+            "min: {0:.3f}, {1:.3f}\n"
+            "max: {2:.3f}, {3:.3f}"
+        ).format(min_lonlat[0], min_lonlat[1], max_lonlat[0], max_lonlat[1])
+
+        ax.text(
+            0.99, 0.01, coord_text,
+            transform=ax.transAxes,
+            ha="right", va="bottom",
+            fontsize=7,
+            color="black",
+            bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.2"),
+            path_effects=[pe.withStroke(linewidth=2.0, foreground="white")]
+        )
+
 
     ax.set_xlabel("Γεωγρ. μήκος", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
