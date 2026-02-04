@@ -985,17 +985,22 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
         out_adj[final_mask] = out_adj[final_mask] - extra_eff[final_mask]
 
     # =========================
-    # MIN/MAX AFTER ALL ADJUSTMENTS
+    # MIN/MAX FOR TEXT ONLY (ENVELOPES + NIGHT ADJ ON MIN), MAP UNCHANGED
+    #   - min from min(out_cold, out_adj) so night cold pockets can lower the text min too
+    #   - max from out_hot
     # =========================
     interp_min = None
     interp_max = None
     try:
-        vals = out_adj[final_mask]
-        if vals.size > 0:
-            interp_min = float(np.nanmin(vals))
-            interp_max = float(np.nanmax(vals))
+        cold_vals = np.minimum(out_cold, out_adj)[final_mask]
+        hot_vals  = out_hot[final_mask]
+    
+        if cold_vals.size > 0 and hot_vals.size > 0:
+            interp_min = float(np.nanmin(cold_vals))
+            interp_max = float(np.nanmax(hot_vals))
     except Exception:
         interp_min, interp_max = None, None
+
 
     # =========================
     # FROST % AFTER ALL ADJUSTMENTS
