@@ -114,8 +114,8 @@ jobs:
         with:
           name: TodayMaps
           path: |
-            TodayRainMaps/
-            TminMaps/
-            TmaxMaps/
+            TodayRainMaps/**
+            TminMaps/**
+            TmaxMaps/**
           if-no-files-found: warn
           retention-days: 7
