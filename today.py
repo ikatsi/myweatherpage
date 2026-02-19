@@ -56,6 +56,8 @@ import rasterio
 
 EXCLUDE_TMAX_WEBCODES = {"hua_ilion", "hua_argyroupoli"}
 EXCLUDE_PPN_WEBCODES = {"pws2_chalkida"}
+EXCLUDE_ALL_WEBCODES = {"pws_gebze"}
+
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__) or ".")
 
@@ -924,16 +926,19 @@ def main():
             .str.strip()
             .str.lower()
         )
-
+    
         exclude_ppn = {w.strip().lower() for w in EXCLUDE_PPN_WEBCODES}
-
+        exclude_all = {w.strip().lower() for w in EXCLUDE_ALL_WEBCODES}
+    
         mask = (
             ~wc.str.match(r"(?i)^wu_lefkaditi$", na=False) &
             ~wc.str.match(r"(?i)^age_klimamilou$", na=False) &
             ~wc.str.match(r"(?i)^uoi_", na=False) &
-            ~wc.isin(exclude_ppn)
+            ~wc.isin(exclude_ppn) &
+            ~wc.isin(exclude_all)
         )
         today_data = today_data[mask].copy()
+
 
     if today_data.empty:
         print("No data after midnight filter.")
