@@ -1,0 +1,55 @@
+name: harokopeio
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every hour (UTC). Athens time is handled inside your script via Europe/Athens.
+    - cron: "15 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: harokopeio
+  cancel-in-progress: true
+
+jobs:
+  build-json:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system deps (netCDF)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnetcdf-dev
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run harokopeio.py
+        run: |
+          python harokopeio.py
+
+      - name: Commit harokopeio.json (if changed)
+        run: |
+          if git diff --quiet -- harokopeio.json; then
+            echo "No changes in harokopeio.json"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add harokopeio.json
+          git commit -m "Update harokopeio.json"
+          git push
