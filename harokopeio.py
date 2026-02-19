@@ -1,36 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-build_harokopeio_json.py
+Download each HUA Meteoclima station latest_month.nc, compute DAILY stats in Europe/Athens
+(local day boundaries with DST handled), write harokopeio.json, and optionally upload it via FTPS.
 
-Download each HUA Meteoclima station `latest_month.nc`, compute DAILY stats in Europe/Athens
-(local day boundaries with DST handled), and write `harokopeio.json`.
-
-Per station, per local date (YYYY-MM-DD), outputs:
-- tmin:   minimum temperature (°C)
-- tavg:   mean temperature (°C)
-- tmax:   maximum temperature (°C)
-- ppn:    daily precipitation sum (mm), derived from cumulative `rainYear` increments
-- wspeed: mean wind speed (km/h), from `windSpeed` (m/s) * 3.6
-- hisp:   maximum wind gust (km/h), from `windGust` (m/s) * 3.6
-
-Notes
-- NetCDF time is treated as UTC and converted to Europe/Athens.
-- If `rainYear` resets, negative diffs are clipped to 0.
-- Day aggregation is done by local calendar day (Athens), not UTC day.
-
-Example:
-  python3 build_harokopeio_json.py --out harokopeio.json
+Outputs per station (per local date YYYY-MM-DD):
+- tmin: min tempC
+- tavg: mean tempC
+- tmax: max tempC
+- ppn:  sum of precipitation increments (mm) derived from cumulative rainYear
+- wspeed: mean windSpeed converted to kph (source is m/s)
+- hisp: max windGust converted to kph (source is m/s)
 """
 
-from __future__ import annotations
-
-import argparse
-import json
-import logging
 import os
+import json
 import tempfile
-from typing import Any, Dict, Optional
+from typing import Dict, Any, Optional
+from pathlib import Path
+from ftplib import FTP_TLS
 
 import numpy as np
 import pandas as pd
@@ -38,15 +27,20 @@ import requests
 import xarray as xr
 from zoneinfo import ZoneInfo
 
-LOG = logging.getLogger("harokopeio")
-
 
 # ======================
-# DEFAULT CONFIG
+# CONFIG
 # ======================
 TZ_LOCAL = ZoneInfo("Europe/Athens")
 
-STATIONS: Dict[str, str] = {
+# All sensitive values are injected via environment variables by the CI runner.
+# You created these in GitHub → Settings → Secrets and variables → Actions.
+DATA_URL = os.environ.get("CURRENTWEATHER_URL", "").strip()  # your secret name
+FTP_HOST = os.environ.get("FTP_HOST", "").strip()
+FTP_USER = os.environ.get("FTP_USER", "").strip()
+FTP_PASS = os.environ.get("FTP_PASS", "").strip()  # empty disables uploads
+
+STATIONS = {
     # webcode: station_folder
     "hua_alimos": "Alimos",
     "hua_argyroupoli": "Argyroupolis",
@@ -55,28 +49,39 @@ STATIONS: Dict[str, str] = {
     "hua_elefsina": "Elefsis",
     "hua_nikaia": "Nikaia",
     "hua_rafina": "Rafina",
-    "hua_ilion": "Tritsi",  # dashboard folder is Tritsi, webcode requested is hua_ilion
+    "hua_ilion": "Tritsi",  # dashboard folder is Tritsi, webcode you want is hua_ilion
 }
 
-BASE = "http://meteoclima.hua.gr/stations"
+# Fallback base if DATA_URL is not set (keeps local runs working)
+DEFAULT_BASE = "http://meteoclima.hua.gr/stations"
 NC_NAME = "latest_month.nc"
 
-DEFAULT_OUT = "harokopeio.json"
-DEFAULT_TIMEOUT = 30
+OUT_JSON = "harokopeio.json"
 
-USER_AGENT = "harokopeio-json-builder/1.0 (+https://github.com/your-org/your-repo)"
+HTTP_TIMEOUT = 30
+USER_AGENT = "Mozilla/5.0 (compatible; harokopeio-json-builder/1.0)"
 
 
 # ======================
 # HELPERS
 # ======================
-def download_nc(url: str, timeout: int) -> str:
+def station_nc_url(folder: str) -> str:
     """
-    Download a URL to a temporary .nc file and return the file path.
-    Caller is responsible for deleting the returned path.
+    If DATA_URL is provided, use it as the base prefix.
+    Otherwise use DEFAULT_BASE.
+
+    Expected:
+    - DATA_URL like "http://meteoclima.hua.gr/stations"
+      final: "{DATA_URL}/{folder}/latest_month.nc"
     """
+    base = DATA_URL if DATA_URL else DEFAULT_BASE
+    return f"{base.rstrip('/')}/{folder}/{NC_NAME}"
+
+
+def download_nc(url: str) -> str:
+    """Download to a temp file and return the file path."""
     headers = {"User-Agent": USER_AGENT}
-    r = requests.get(url, headers=headers, timeout=timeout, stream=True)
+    r = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT, stream=True)
     r.raise_for_status()
 
     fd, tmp_path = tempfile.mkstemp(suffix=".nc", prefix="hua_")
@@ -90,177 +95,226 @@ def download_nc(url: str, timeout: int) -> str:
     return tmp_path
 
 
-def to_local_time_index(time_values: np.ndarray) -> pd.DatetimeIndex:
+def to_local_times_athens(time_values: np.ndarray) -> pd.DatetimeIndex:
     """
-    Interpret netCDF 'time' values as UTC, convert to Europe/Athens, return tz-aware index.
+    Treat netCDF 'time' as UTC timestamps, convert to Europe/Athens.
+    Returns tz-aware DatetimeIndex in Europe/Athens.
     """
-    t = pd.to_datetime(time_values)              # naive timestamps
+    t = pd.to_datetime(time_values)  # naive datetime64 -> Timestamp, no tz
     t = t.tz_localize("UTC").tz_convert(TZ_LOCAL)
     return t
 
 
-def safe_1d_float(ds: xr.Dataset, varname: str) -> np.ndarray:
-    """
-    Return ds[varname] flattened to 1D float64.
-    """
-    arr = np.asarray(ds[varname].values).reshape(-1)
+def safe_series(ds: xr.Dataset, varname: str) -> np.ndarray:
+    """Return ds[varname] as a 1D numpy float array (or raise KeyError)."""
+    arr = ds[varname].values
+    arr = np.asarray(arr).reshape(-1)
     return arr.astype("float64", copy=False)
-
-
-def ms_to_kph(x: np.ndarray) -> np.ndarray:
-    return np.asarray(x, dtype="float64") * 3.6
 
 
 def precipitation_from_cumulative(cum_mm: np.ndarray) -> np.ndarray:
     """
-    Convert a cumulative rainfall series (mm) to per-sample increments (mm).
+    Convert cumulative rainfall (mm) to per-observation increments (mm).
     Handles resets by clipping negative diffs to 0.
     """
     cum = np.asarray(cum_mm, dtype="float64")
-    inc = np.diff(cum, prepend=cum[0])  # first increment becomes 0 by construction
+    if cum.size == 0:
+        return cum
+
+    inc = np.diff(cum, prepend=cum[0])
     inc[~np.isfinite(inc)] = 0.0
     inc = np.where(inc < 0, 0.0, inc)
     return inc
 
 
-def r1(x: Optional[float]) -> Optional[float]:
-    return None if x is None else round(float(x), 1)
+def ms_to_kph(x: np.ndarray) -> np.ndarray:
+    """m/s to km/h"""
+    return np.asarray(x, dtype="float64") * 3.6
+
+
+def _round_or_none(x: Optional[float], nd: int) -> Optional[float]:
+    if x is None:
+        return None
+    if not np.isfinite(x):
+        return None
+    return round(float(x), nd)
 
 
 def build_daily_stats(ds: xr.Dataset) -> Dict[str, Dict[str, Optional[float]]]:
     """
-    Compute per-local-day stats from a station dataset.
-
-    Returns:
-      { "YYYY-MM-DD": {"tmin":..., "tavg":..., "tmax":..., "ppn":..., "wspeed":..., "hisp":...} }
+    Given an opened station dataset, compute per-local-day stats.
+    Returns: { "YYYY-MM-DD": {tmin,tavg,tmax,ppn,wspeed,hisp} }
     """
-    required = ["time", "tempC", "windSpeed", "windGust", "rainYear"]
-    missing = [v for v in required if v not in ds]
-    if missing:
-        raise KeyError(f"Missing required variables: {', '.join(missing)}")
+    needed = ["time", "tempC", "windSpeed", "windGust", "rainYear"]
+    for v in needed:
+        if v not in ds:
+            raise KeyError(f"Missing variable '{v}' in nc file. Found: {list(ds.variables)}")
 
-    t_local = to_local_time_index(ds["time"].values)
+    t_local = to_local_times_athens(ds["time"].values)
     if len(t_local) == 0:
         return {}
 
-    tempC = safe_1d_float(ds, "tempC")
-    windSpeed_kph = ms_to_kph(safe_1d_float(ds, "windSpeed"))
-    windGust_kph = ms_to_kph(safe_1d_float(ds, "windGust"))
-    rain_inc_mm = precipitation_from_cumulative(safe_1d_float(ds, "rainYear"))
+    tempC = safe_series(ds, "tempC")
+    windSpeed_ms = safe_series(ds, "windSpeed")
+    windGust_ms = safe_series(ds, "windGust")
+    rainYear = safe_series(ds, "rainYear")
+
+    # Convert wind to kph
+    windSpeed_kph = ms_to_kph(windSpeed_ms)
+    windGust_kph = ms_to_kph(windGust_ms)
+
+    # Precip increments from cumulative rainYear (mm)
+    rain_inc = precipitation_from_cumulative(rainYear)
+
+    # Align lengths defensively (sometimes variables can mismatch in weird files)
+    n = min(len(t_local), len(tempC), len(windSpeed_kph), len(windGust_kph), len(rain_inc))
+    t_local = t_local[:n]
+    tempC = tempC[:n]
+    windSpeed_kph = windSpeed_kph[:n]
+    windGust_kph = windGust_kph[:n]
+    rain_inc = rain_inc[:n]
 
     df = pd.DataFrame(
         {
             "tempC": tempC,
             "windSpeed_kph": windSpeed_kph,
             "windGust_kph": windGust_kph,
-            "rain_inc_mm": rain_inc_mm,
+            "rain_inc_mm": rain_inc,
         },
         index=t_local,
     )
 
     df = df[~df.index.isna()].copy()
+    if df.empty:
+        return {}
+
+    g = df.groupby(df.index.date)
 
     out: Dict[str, Dict[str, Optional[float]]] = {}
-    for d, part in df.groupby(df.index.date):
+    for d, part in g:
         day_key = d.isoformat()
 
-        temp = part["tempC"].to_numpy()
-        ws = part["windSpeed_kph"].to_numpy()
-        wg = part["windGust_kph"].to_numpy()
-        rain = part["rain_inc_mm"].to_numpy()
+        if part["tempC"].notna().any():
+            tmin = float(np.nanmin(part["tempC"].values))
+            tmax = float(np.nanmax(part["tempC"].values))
+            tavg = float(np.nanmean(part["tempC"].values))
+        else:
+            tmin = tmax = tavg = None
 
-        tmin = float(np.nanmin(temp)) if np.isfinite(temp).any() else None
-        tmax = float(np.nanmax(temp)) if np.isfinite(temp).any() else None
-        tavg = float(np.nanmean(temp)) if np.isfinite(temp).any() else None
+        # Precip sum: if no valid values, default 0.0
+        if part["rain_inc_mm"].notna().any():
+            ppn = float(np.nansum(part["rain_inc_mm"].values))
+        else:
+            ppn = 0.0
 
-        wspeed = float(np.nanmean(ws)) if np.isfinite(ws).any() else None
-        hisp = float(np.nanmax(wg)) if np.isfinite(wg).any() else None
+        if part["windSpeed_kph"].notna().any():
+            wspeed = float(np.nanmean(part["windSpeed_kph"].values))
+        else:
+            wspeed = None
 
-        ppn = float(np.nansum(rain)) if np.isfinite(rain).any() else 0.0
+        if part["windGust_kph"].notna().any():
+            hisp = float(np.nanmax(part["windGust_kph"].values))
+        else:
+            hisp = None
 
         out[day_key] = {
-            "tmin": r1(tmin),
-            "tavg": r1(tavg),
-            "tmax": r1(tmax),
-            "ppn": r1(ppn),
-            "wspeed": r1(wspeed),
-            "hisp": r1(hisp),
+            "tmin": _round_or_none(tmin, 1),
+            "tavg": _round_or_none(tavg, 1),
+            "tmax": _round_or_none(tmax, 1),
+            "ppn": _round_or_none(ppn, 1),
+            "wspeed": _round_or_none(wspeed, 1),
+            "hisp": _round_or_none(hisp, 1),
         }
 
     return out
 
 
-def build_payload(timeout: int) -> Dict[str, Any]:
+def ftp_upload_file(local_path: str, remote_filename: str) -> None:
     """
-    Build the full JSON payload across all stations.
+    Upload local_path to FTP server root as remote_filename using FTP over TLS.
+    If FTP_PASS is empty, uploads are disabled.
     """
-    stations_out: Dict[str, Any] = {}
+    if not FTP_PASS:
+        print("FTP_PASS empty -> uploads disabled; skipping FTP upload.")
+        return
+    if not FTP_HOST or not FTP_USER:
+        raise RuntimeError("FTP upload requested but FTP_HOST/FTP_USER not set.")
+
+    p = Path(local_path)
+    if not p.exists():
+        raise FileNotFoundError(f"Local file missing: {local_path}")
+
+    with FTP_TLS(FTP_HOST, timeout=30) as ftp:
+        ftp.login(FTP_USER, FTP_PASS)
+        ftp.prot_p()  # secure data channel
+        with p.open("rb") as f:
+            ftp.storbinary(f"STOR {remote_filename}", f)
+
+
+# ======================
+# MAIN
+# ======================
+def main() -> None:
+    all_data: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
 
     for webcode, folder in STATIONS.items():
-        url = f"{BASE}/{folder}/{NC_NAME}"
-        tmp_path: Optional[str] = None
+        url = station_nc_url(folder)
+        tmp_path = None
 
         try:
-            LOG.info("Downloading %s (%s)", webcode, url)
-            tmp_path = download_nc(url, timeout=timeout)
+            tmp_path = download_nc(url)
 
-            # engine="netcdf4" may be needed on some setups; xarray will choose best available.
+            # Load dataset (disable CF decode guessing if you ever see time weirdness)
             ds = xr.open_dataset(tmp_path)
+
             daily = build_daily_stats(ds)
 
-            stations_out[webcode] = {
+            all_data[webcode] = {
                 "source_nc": url,
                 "tz": "Europe/Athens",
-                "days": daily,
+                "days": daily,  # {YYYY-MM-DD: {...}}
             }
 
         except Exception as e:
-            msg = f"{type(e).__name__}: {e}"
-            errors[webcode] = msg
-            LOG.exception("Failed for %s: %s", webcode, msg)
-            stations_out[webcode] = {
+            err = f"{type(e).__name__}: {e}"
+            errors[webcode] = err
+            all_data[webcode] = {
                 "source_nc": url,
                 "tz": "Europe/Athens",
                 "days": {},
-                "error": msg,
+                "error": err,
             }
 
         finally:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
+            try:
+                if tmp_path and os.path.exists(tmp_path):
                     os.remove(tmp_path)
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
-    return {
+    payload = {
         "generated_utc": pd.Timestamp.utcnow().isoformat() + "Z",
-        "stations": stations_out,
-        "errors": errors,  # convenience top-level
+        "stations": all_data,
     }
 
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Build harokopeio.json from HUA Meteoclima netCDF files.")
-    p.add_argument("--out", default=DEFAULT_OUT, help="Output JSON path (default: harokopeio.json)")
-    p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="HTTP timeout seconds (default: 30)")
-    p.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING...)")
-    return p.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(levelname)s: %(message)s")
-
-    payload = build_payload(timeout=args.timeout)
-
-    with open(args.out, "w", encoding="utf-8") as f:
+    with open(OUT_JSON, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    LOG.info("Wrote %s", args.out)
+    print(f"OK: wrote {OUT_JSON}")
 
-    if payload.get("errors"):
-        LOG.warning("Some stations had errors (%d). See `errors` in JSON.", len(payload["errors"]))
+    # Optional FTP upload to server root
+    try:
+        ftp_upload_file(OUT_JSON, os.path.basename(OUT_JSON))
+        if FTP_PASS:
+            print(f"OK: uploaded {OUT_JSON} to FTP root as {os.path.basename(OUT_JSON)}")
+    except Exception as e:
+        print(f"WARNING: FTP upload failed: {type(e).__name__}: {e}")
+
+    if errors:
+        print("\nSome stations had errors:")
+        for k, v in errors.items():
+            print(f" - {k}: {v}")
 
 
 if __name__ == "__main__":
