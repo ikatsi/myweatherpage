@@ -55,7 +55,7 @@ import rasterio
 # =========================
 
 EXCLUDE_TMAX_WEBCODES = {"hua_ilion", "hua_argyroupoli", "age_leventochori"}
-EXCLUDE_PPN_WEBCODES = {"pws2_chalkida"}
+EXCLUDE_PPN_WEBCODES = {"pws2_chalkida", "age_vrana"}
 EXCLUDE_ALL_WEBCODES = {"pws_gebze"}
 
 
