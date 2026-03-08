@@ -899,7 +899,7 @@ def load_and_clean_feed(text: str, cache_txt: str = "", lon_min=None, lon_max=No
     print(f"🧹 drop zero lat/lon: {before} -> {len(df)} (removed {before - len(df)})")
 
     if "webcode" in df.columns:
-        bad = ["agrivate_rizia", "metaxochori"]
+        bad = ["agrivate_rizia"]
         before = len(df)
         df = df[~df["webcode"].astype(str).str.lower().isin(bad)].copy()
         print(f"🧹 remove bad webcodes {bad}: {before} -> {len(df)} (removed {before - len(df)})")
