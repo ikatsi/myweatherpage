@@ -1063,17 +1063,31 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
 
     ax.set_title("Τρέχουσα θερμοκρασία (προσαρμογή υψομέτρου)", fontsize=16)
 
-    if interp_min is not None and interp_max is not None:
-        mm_text = "Εύρος παρεμβολής (ξηρά):\n{0:.1f} έως {1:.1f}°C".format(interp_min, interp_max)
-        ax.text(
-            0.01, 0.985, mm_text,
+    if (
+        interp_min is not None and interp_max is not None and
+        min_lonlat is not None and max_lonlat is not None
+    ):
+        x0 = 0.01
+        y0 = 0.985
+
+        line1 = "Εύρος παρεμβολής (ξηρά):"
+        line2 = "{0:.1f} έως {1:.1f}°C".format(interp_min, interp_max)
+        line3 = "{0:.3f}, {1:.3f} έως {2:.3f}, {3:.3f}".format(
+            min_lonlat[1], min_lonlat[0],
+            max_lonlat[1], max_lonlat[0]
+        )
+
+        common_kw = dict(
             transform=ax.transAxes,
             ha="left", va="top",
-            fontsize=11,
             color="black",
             bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.2"),
             path_effects=[pe.withStroke(linewidth=3.0, foreground="white")]
         )
+
+        ax.text(x0, y0, line1, fontsize=11, **common_kw)
+        ax.text(x0, y0 - 0.038, line2, fontsize=11, **common_kw)
+        ax.text(x0, y0 - 0.072, line3, fontsize=7, **common_kw)
 
     ax.set_xlabel("Γεωγρ. μήκος", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
