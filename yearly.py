@@ -70,12 +70,6 @@ REG_MIN_NEIGHBORS = 3
 REG_DISTANCE_MASK_M = 170_000
 
 # Yearly mean temperature lapse-rate settings
-# Same rationale as perfected monthly code:
-# - use direct station avg_tavg (year-to-date mean)
-# - de-altitude to a sea-level equivalent field
-# - interpolate sea-level field + lapse field
-# - restore elevation with DEM
-# - do NOT use snapshot logic such as cold pools / wind / RH / envelopes
 LAPSE_DEFAULT = -0.0065
 LAPSE_MIN = -0.0100
 LAPSE_MAX = 0.0020
@@ -93,6 +87,10 @@ if not GEOJSON_PASS:
 if not FTP_HOST or not FTP_USER or not FTP_PASS:
     raise RuntimeError("FTP_HOST / FTP_USER / FTP_PASS environment variables are not all set.")
 
+
+# ======================
+# REGION DEFINITIONS
+# ======================
 REGIONS = [
     {
         "key": "greece",
@@ -100,6 +98,8 @@ REGIONS = [
         "outfile": "yearlyppn.png",
         "temp_title": "Μέση θερμοκρασία στην Ελλάδα (τρέχον έτος, προσαρμογή υψομέτρου)",
         "temp_outfile": "yearlytavg.png",
+        "hydro_title": "Υπολ. σωρευτικός υετός στην Ελλάδα (τρέχον υδρολογικό έτος)",
+        "hydro_outfile": "yearlyhydroppn.png",
         "lon_min": 19.0,  "lon_max": 30.0,
         "lat_min": 34.5,  "lat_max": 42.5,
         "temp_mode": "wgs84"
@@ -110,6 +110,8 @@ REGIONS = [
         "outfile": "yearlyppn_attica.png",
         "temp_title": "Μέση θερμοκρασία Αττικής (τρέχον έτος, προσαρμογή υψομέτρου)",
         "temp_outfile": "yearlytavg_attica.png",
+        "hydro_title": "Υπολ. σωρευτικός υετός Αττικής (τρέχον υδρολογικό έτος)",
+        "hydro_outfile": "yearlyhydroppn_attica.png",
         "lon_min": 22.7,  "lon_max": 25.0,
         "lat_min": 37.5,  "lat_max": 38.7,
         "temp_mode": "egsa"
@@ -120,6 +122,8 @@ REGIONS = [
         "outfile": "yearlyppn_negreece.png",
         "temp_title": "Μέση θερμοκρασία ΒΑ Ελλάδας (τρέχον έτος, προσαρμογή υψομέτρου)",
         "temp_outfile": "yearlytavg_negreece.png",
+        "hydro_title": "Υπολ. σωρευτικός υετός ΒΑ Ελλάδας (τρέχον υδρολογικό έτος)",
+        "hydro_outfile": "yearlyhydroppn_negreece.png",
         "lon_min": 22.0,  "lon_max": 26.6,
         "lat_min": 39.7,  "lat_max": 41.8,
         "top_n": 15,
@@ -132,6 +136,8 @@ REGIONS = [
         "outfile": "yearlyppn_crete.png",
         "temp_title": "Μέση θερμοκρασία Κρήτης (τρέχον έτος, προσαρμογή υψομέτρου)",
         "temp_outfile": "yearlytavg_crete.png",
+        "hydro_title": "Υπολ. σωρευτικός υετός Κρήτης (τρέχον υδρολογικό έτος)",
+        "hydro_outfile": "yearlyhydroppn_crete.png",
         "lon_min": 23.37, "lon_max": 26.4,
         "lat_min": 34.7,  "lat_max": 35.78,
         "top_n": 12,
@@ -276,19 +282,19 @@ def bbox_filter(df, lon_min, lon_max, lat_min, lat_max):
     ].copy()
 
 
-def build_top_text(region_df, top_n):
-    top_source = region_df.dropna(subset=["total_precipitation_missing"]).copy()
+def build_top_text(region_df, top_n, value_col):
+    top_source = region_df.dropna(subset=[value_col]).copy()
     if top_source.empty:
         return ""
 
-    topn = top_source.nlargest(int(top_n), "total_precipitation_missing")
+    topn = top_source.nlargest(int(top_n), value_col)
     lines = []
 
     for _, r in topn.iterrows():
         name, is_citygr = station_name(r)
         if is_citygr:
             name = abbreviate_gr_name(name)
-        mm = fmt_mm_gr(r["total_precipitation_missing"])
+        mm = fmt_mm_gr(r[value_col])
         if name and mm:
             lines.append(f"{name} {mm} mm")
 
@@ -541,7 +547,6 @@ def add_temp_contours(ax, X, Y, field):
 
 # ======================
 # SHARED TEMP PALETTE
-# SAME AS TNOW / MONTHLY
 # ======================
 TEMP_VMIN = -25.0
 TEMP_VMAX = 45.0
@@ -600,58 +605,81 @@ def upload_via_session(ftps, file_buffer, filename):
 
 
 # ======================
-# LOAD DATA
+# LOAD RAW DATA ONCE
 # ======================
 response = requests.get(TXT_URL, headers=HEADERS, timeout=TIMEOUT)
 response.raise_for_status()
 response.encoding = "utf-8"
-data = pd.read_csv(StringIO(response.text), delimiter="\t")
+raw_data = pd.read_csv(StringIO(response.text), delimiter="\t")
 
 athens_now = datetime.now(ZoneInfo("Europe/Athens"))
 today_yday = athens_now.timetuple().tm_yday
 
-w = data["webcode"].astype("string").str.strip().str.casefold()
+if "webcode" not in raw_data.columns:
+    raise RuntimeError("Input data has no 'webcode' column.")
 
-excluded_exact = {
+raw_data["webcode"] = raw_data["webcode"].astype("string")
+w = raw_data["webcode"].str.strip().str.casefold()
+
+# Numeric columns
+for col in [
+    "latitude", "longitude",
+    "daysinyear",
+    "total_precipitation", "total_precipitation_missing",
+    "avg_tavg",
+    "hydro_year_precipitation", "hydro_year_precipitation_missing"
+]:
+    if col in raw_data.columns:
+        raw_data[col] = pd.to_numeric(raw_data[col], errors="coerce")
+
+# -------- Existing yearly/calendar filter logic (UNCHANGED) --------
+excluded_exact_year = {
     "agrivate_stavroupoli", "age_dasosxiromerou",
     "agrivate_rizia", "age_agiosilias",
     "hnms3_megara", "wu_varnavas", "wu_sykamino", "wu_avlonas",
     "age_galatas", "agrivate_messouni", "voutsaras", "pws_proti2", "age_vrana", "potamoi"
 }
-excluded_prefixes = ("hcmr", "uoi_")
+excluded_prefixes_year = ("hcmr", "uoi_")
 
-if "daysinyear" in data.columns:
-    daysinyear_num = pd.to_numeric(data["daysinyear"], errors="coerce")
-    data = data[
-        (daysinyear_num == today_yday)
-        & (~w.isin(excluded_exact))
-        & (~w.str.startswith(excluded_prefixes, na=False))
+if "daysinyear" in raw_data.columns:
+    data_year = raw_data[
+        (raw_data["daysinyear"] == today_yday)
+        & (~w.isin(excluded_exact_year))
+        & (~w.str.startswith(excluded_prefixes_year, na=False))
     ].copy()
 else:
-    data = data[
-        (~w.isin(excluded_exact))
-        & (~w.str.startswith(excluded_prefixes, na=False))
+    data_year = raw_data[
+        (~w.isin(excluded_exact_year))
+        & (~w.str.startswith(excluded_prefixes_year, na=False))
     ].copy()
 
-data["latitude"] = pd.to_numeric(data["latitude"], errors="coerce")
-data["longitude"] = pd.to_numeric(data["longitude"], errors="coerce")
-data["total_precipitation"] = pd.to_numeric(data["total_precipitation"], errors="coerce")
+data_year = data_year.dropna(subset=["latitude", "longitude"]).copy()
 
-if "total_precipitation_missing" in data.columns:
-    data["total_precipitation_missing"] = pd.to_numeric(
-        data["total_precipitation_missing"], errors="coerce"
-    )
+# -------- Hydro filter logic (as in standalone hydro script) --------
+excluded_exact_hydro = {
+    "agrivate_stavroupoli", "age_dasosxiromerou",
+    "agrivate_rizia", "age_agiosilias", "metaxochori",
+    "hnms3_megara", "wu_varnavas", "wu_sykamino", "wu_avlonas",
+    "age_galatas", "agrivate_messouni", "voutsaras",
+    "ierapetra", "age_vrana", "potamoi"
+}
+excluded_prefixes_hydro = ("hcmr", "uoi_")
+
+if "daysinyear" in raw_data.columns:
+    data_hydro = raw_data[
+        (raw_data["daysinyear"] == today_yday)
+        & (~w.isin(excluded_exact_hydro))
+        & (~w.str.startswith(excluded_prefixes_hydro, na=False))
+    ].copy()
 else:
-    data["total_precipitation_missing"] = np.nan
+    data_hydro = raw_data[
+        (~w.isin(excluded_exact_hydro))
+        & (~w.str.startswith(excluded_prefixes_hydro, na=False))
+    ].copy()
 
-if "avg_tavg" in data.columns:
-    data["avg_tavg"] = pd.to_numeric(data["avg_tavg"], errors="coerce")
-else:
-    data["avg_tavg"] = np.nan
+data_hydro = data_hydro.dropna(subset=["latitude", "longitude"]).copy()
 
-data = data.dropna(subset=["latitude", "longitude"]).copy()
-
-if data.empty:
+if data_year.empty and data_hydro.empty:
     raise ValueError("❌ Δεν υπάρχουν δεδομένα μετά το φιλτράρισμα.")
 
 
@@ -679,9 +707,8 @@ else:
 
 # ======================
 # PRECIPITATION COLORS / LEVELS
-# KEEP YEARLY PPN STYLE
 # ======================
-cmap = ListedColormap([
+PPN_CMAP = ListedColormap([
     "#ffffff",
     "#e3f2fd",
     "#90caf9",
@@ -696,30 +723,38 @@ cmap = ListedColormap([
     "#ffe082"
 ])
 
-bounds = [0, 120, 240, 360, 480, 600, 720, 840, 960, 1080, 1200, 1500, 10000]
-norm = BoundaryNorm(boundaries=bounds, ncolors=cmap.N)
-contour_levels = [120, 240, 360, 480, 600, 720, 840, 960, 1080, 1200, 1500]
+PPN_BOUNDS = [0, 120, 240, 360, 480, 600, 720, 840, 960, 1080, 1200, 1500, 10000]
+PPN_NORM = BoundaryNorm(boundaries=PPN_BOUNDS, ncolors=PPN_CMAP.N)
+PPN_CONTOUR_LEVELS = [120, 240, 360, 480, 600, 720, 840, 960, 1080, 1200, 1500]
 
 
 # ======================
 # MAP BUILDERS
 # ======================
-def build_precip_map_buffer(region_df, reg, timestamp_text):
+def build_precip_map_buffer(
+    region_df,
+    reg,
+    timestamp_text,
+    strict_value_col,
+    top_value_col,
+    title_text,
+    cbar_label
+):
     lon_min = reg["lon_min"]
     lon_max = reg["lon_max"]
     lat_min = reg["lat_min"]
     lat_max = reg["lat_max"]
 
     map_data = region_df.dropna(
-        subset=["total_precipitation", "latitude", "longitude"]
+        subset=[strict_value_col, "latitude", "longitude"]
     ).copy()
 
     if map_data.empty:
-        print("⚠️ No strict yearly data for region:", reg["key"], "-> skipping precipitation map")
+        print("⚠️ No precipitation data for region:", reg["key"], "column:", strict_value_col, "-> skipping map")
         return None
 
     top_n = int(reg.get("top_n", TOP_N))
-    top_text = build_top_text(region_df, top_n)
+    top_text = build_top_text(region_df, top_n, top_value_col)
 
     grid_x, grid_y = np.meshgrid(
         np.linspace(lon_min, lon_max, GRID_N),
@@ -728,7 +763,7 @@ def build_precip_map_buffer(region_df, reg, timestamp_text):
 
     lats = map_data["latitude"].to_numpy(dtype=float)
     lons = map_data["longitude"].to_numpy(dtype=float)
-    values = map_data["total_precipitation"].to_numpy(dtype=float)
+    values = map_data[strict_value_col].to_numpy(dtype=float)
 
     grid_intensity = idw_optimized(lons, lats, values, grid_x, grid_y)
 
@@ -748,8 +783,8 @@ def build_precip_map_buffer(region_df, reg, timestamp_text):
         masked_intensity,
         extent=(lon_min, lon_max, lat_min, lat_max),
         origin="lower",
-        cmap=cmap,
-        norm=norm,
+        cmap=PPN_CMAP,
+        norm=PPN_NORM,
         alpha=0.7
     )
 
@@ -762,14 +797,14 @@ def build_precip_map_buffer(region_df, reg, timestamp_text):
 
     ax.contour(
         grid_x, grid_y, masked_intensity,
-        levels=contour_levels, colors="black", linewidths=0.5
+        levels=PPN_CONTOUR_LEVELS, colors="black", linewidths=0.5
     )
 
-    cbar = plt.colorbar(img, ax=ax, orientation="vertical", boundaries=bounds)
+    cbar = plt.colorbar(img, ax=ax, orientation="vertical", boundaries=PPN_BOUNDS)
     cbar.set_ticks([0, 120, 240, 360, 480, 600, 720, 840, 960, 1080, 1200, 1500])
-    cbar.set_label("Υπολογ. σωρευτικός υετός έτους (mm)", fontsize=12)
+    cbar.set_label(cbar_label, fontsize=12)
 
-    ax.set_title(reg["title"], fontsize=16)
+    ax.set_title(title_text, fontsize=16)
     ax.set_xlabel("Γεωγραφικό μήκος", fontsize=12)
     ax.set_ylabel("Γεωγραφικό πλάτος", fontsize=12)
 
@@ -1155,31 +1190,89 @@ def main():
 
     outputs = []
 
-    # 1) National precipitation
+    # -------------------------------------------------
+    # 1) Existing national calendar-year precipitation
+    # -------------------------------------------------
     reg = REGIONS[0]
-    region_df = bbox_filter(data, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
-    buf = build_precip_map_buffer(region_df, reg, timestamp_text)
+    region_df_year = bbox_filter(data_year, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+    buf = build_precip_map_buffer(
+        region_df=region_df_year,
+        reg=reg,
+        timestamp_text=timestamp_text,
+        strict_value_col="total_precipitation",
+        top_value_col="total_precipitation_missing",
+        title_text=reg["title"],
+        cbar_label="Υπολογ. σωρευτικός υετός έτους (mm)"
+    )
     if buf is not None:
         outputs.append(("precip", reg["outfile"], buf))
 
-    # 2) National tavg
-    buf = build_yearly_tavg_greece_buffer(region_df, reg, greece, athens_now, timestamp_text)
+    # -------------------------------------------------
+    # 2) Existing national yearly mean temperature
+    # -------------------------------------------------
+    buf = build_yearly_tavg_greece_buffer(region_df_year, reg, greece, athens_now, timestamp_text)
     if buf is not None:
         outputs.append(("temp", reg["temp_outfile"], buf))
 
-    # 3) Regional precipitation
+    # -------------------------------------------------
+    # 3) Existing regional calendar-year precipitation
+    # -------------------------------------------------
     for reg in REGIONS[1:]:
-        region_df = bbox_filter(data, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
-        buf = build_precip_map_buffer(region_df, reg, timestamp_text)
+        region_df_year = bbox_filter(data_year, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+        buf = build_precip_map_buffer(
+            region_df=region_df_year,
+            reg=reg,
+            timestamp_text=timestamp_text,
+            strict_value_col="total_precipitation",
+            top_value_col="total_precipitation_missing",
+            title_text=reg["title"],
+            cbar_label="Υπολογ. σωρευτικός υετός έτους (mm)"
+        )
         if buf is not None:
             outputs.append(("precip", reg["outfile"], buf))
 
-    # 4) Regional temperature
+    # -------------------------------------------------
+    # 4) Existing regional yearly mean temperature
+    # -------------------------------------------------
     for reg in REGIONS[1:]:
-        region_df = bbox_filter(data, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
-        buf = build_yearly_tavg_region_egsa_buffer(region_df, reg, greece, athens_now, timestamp_text)
+        region_df_year = bbox_filter(data_year, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+        buf = build_yearly_tavg_region_egsa_buffer(region_df_year, reg, greece, athens_now, timestamp_text)
         if buf is not None:
             outputs.append(("temp", reg["temp_outfile"], buf))
+
+    # -------------------------------------------------
+    # 5) NEW national hydrological-year precipitation
+    # -------------------------------------------------
+    reg = REGIONS[0]
+    region_df_hydro = bbox_filter(data_hydro, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+    buf = build_precip_map_buffer(
+        region_df=region_df_hydro,
+        reg=reg,
+        timestamp_text=timestamp_text,
+        strict_value_col="hydro_year_precipitation",
+        top_value_col="hydro_year_precipitation_missing",
+        title_text=reg["hydro_title"],
+        cbar_label="Υπολογ. σωρευτικός υετός υδρολογικού έτους (mm)"
+    )
+    if buf is not None:
+        outputs.append(("hydro_precip", reg["hydro_outfile"], buf))
+
+    # -------------------------------------------------
+    # 6) NEW regional hydrological-year precipitation
+    # -------------------------------------------------
+    for reg in REGIONS[1:]:
+        region_df_hydro = bbox_filter(data_hydro, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+        buf = build_precip_map_buffer(
+            region_df=region_df_hydro,
+            reg=reg,
+            timestamp_text=timestamp_text,
+            strict_value_col="hydro_year_precipitation",
+            top_value_col="hydro_year_precipitation_missing",
+            title_text=reg["hydro_title"],
+            cbar_label="Υπολογ. σωρευτικός υετός υδρολογικού έτους (mm)"
+        )
+        if buf is not None:
+            outputs.append(("hydro_precip", reg["hydro_outfile"], buf))
 
     if not outputs:
         raise RuntimeError("No output maps were generated.")
@@ -1194,11 +1287,15 @@ def main():
             if ok:
                 if kind == "precip":
                     print("✅ Region yearly precipitation map uploaded:", filename)
+                elif kind == "hydro_precip":
+                    print("✅ Region hydrological-year precipitation map uploaded:", filename)
                 else:
                     print("✅ Region yearly tavg map uploaded:", filename)
             else:
                 if kind == "precip":
                     print("❌ Region yearly precipitation map NOT uploaded:", filename)
+                elif kind == "hydro_precip":
+                    print("❌ Region hydrological-year precipitation map NOT uploaded:", filename)
                 else:
                     print("❌ Region yearly tavg map NOT uploaded:", filename)
 
@@ -1212,7 +1309,7 @@ def main():
                 except Exception:
                     pass
 
-    print("✅ Done (current year precipitation + yearly average temperature, all regions processed).")
+    print("✅ Done (calendar-year precipitation + yearly average temperature + hydrological-year precipitation, all regions processed).")
 
 
 if __name__ == "__main__":
