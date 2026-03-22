@@ -4,7 +4,6 @@
 import os
 import re
 import io
-import tempfile
 from io import StringIO
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -31,11 +30,12 @@ import requests
 # CONFIGURATION
 # ======================
 TXT_URL = os.environ.get("CURRENTMONTHURL", "").strip()
-GEOJSON_SECRET = os.environ.get("GEOJSON_PASS", "").strip()
+GEOJSON_PATH = "greece.geojson"
 
 FTP_HOST = os.environ.get("FTP_HOST", "").strip()
 FTP_USER = os.environ.get("FTP_USER", "").strip()
 FTP_PASS = os.environ.get("FTP_PASS", "").strip()
+GEOJSON_PASS = os.environ.get("GEOJSON_PASS", "").strip()
 
 PLOT_WIDTH = 12
 PLOT_HEIGHT = 8
@@ -50,12 +50,11 @@ TIMEOUT = 15
 if not TXT_URL:
     raise RuntimeError("Environment variable CURRENTMONTHURL is not set.")
 
-if not GEOJSON_SECRET:
+if not GEOJSON_PASS:
     raise RuntimeError("Environment variable GEOJSON_PASS is not set.")
 
 if not FTP_HOST or not FTP_USER or not FTP_PASS:
     raise RuntimeError("FTP_HOST / FTP_USER / FTP_PASS environment variables are not all set.")
-
 
 # EXACT BOXES: same as yearly scripts
 REGIONS = [
@@ -210,36 +209,7 @@ def upload_to_ftp(file_buffer, filename):
         print("⚠️ FTP upload failed for {}: {}".format(filename, e))
 
 
-def load_greece_geometry(secret_value):
-    """
-    GEOJSON_PASS may contain either:
-    - a URL
-    - a filesystem path
 
-    For GitHub Actions, URL is usually the realistic choice.
-    """
-    if secret_value.startswith("http://") or secret_value.startswith("https://"):
-        response = requests.get(secret_value, headers=HEADERS, timeout=TIMEOUT)
-        response.raise_for_status()
-
-        with tempfile.NamedTemporaryFile(suffix=".geojson", delete=False) as tmp:
-            tmp.write(response.content)
-            tmp_path = tmp.name
-
-        try:
-            gdf = gpd.read_file(tmp_path)
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
-
-        return gdf
-
-    if not os.path.exists(secret_value):
-        raise RuntimeError("GEOJSON_PASS does not point to an existing local file.")
-
-    return gpd.read_file(secret_value)
 
 
 # ======================
@@ -296,7 +266,10 @@ if data.empty:
 # ======================
 # LOAD GREECE GEOMETRY ONCE
 # ======================
-greece = load_greece_geometry(GEOJSON_SECRET)
+if not os.path.exists(GEOJSON_PATH):
+    raise RuntimeError("greece.geojson not found. It should be decrypted by the workflow before monthly.py runs.")
+
+greece = gpd.read_file(GEOJSON_PATH)
 
 if greece.crs is None:
     greece = greece.set_crs("EPSG:4326")
