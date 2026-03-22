@@ -655,7 +655,19 @@ def upload_via_session(ftps, file_buffer, filename):
 response = requests.get(TXT_URL, headers=HEADERS, timeout=TIMEOUT)
 response.raise_for_status()
 response.encoding = "utf-8"
-raw_data = pd.read_csv(StringIO(response.text), delimiter="\t")
+
+text = response.text.replace("\r\n", "\n").replace("\r", "\n")
+
+print("=== FIRST 20 RESPONSE LINES START ===")
+for i, line in enumerate(text.splitlines()[:20], start=1):
+    print(f"{i:02d}: {line}")
+print("=== FIRST 20 RESPONSE LINES END ===")
+
+raw_data = pd.read_csv(
+    StringIO(text),
+    sep="\t",
+    engine="python"
+)
 
 athens_now = datetime.now(ZoneInfo("Europe/Athens"))
 today_yday = athens_now.timetuple().tm_yday
