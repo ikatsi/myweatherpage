@@ -54,8 +54,8 @@ import rasterio
 # CONFIG (no secrets here)
 # =========================
 
-EXCLUDE_TMAX_WEBCODES = {"hua_ilion", "hua_argyroupoli", "age_leventochori", "age_vrana"}
-EXCLUDE_PPN_WEBCODES = {"pws2_chalkida", "age_vrana", "potamoi"}
+EXCLUDE_TMAX_WEBCODES = {"hua_ilion", "hua_argyroupoli", "age_leventochori", "age_vrana", "age_leptokarya"}
+EXCLUDE_PPN_WEBCODES = {"pws2_chalkida", "age_vrana", "potamoi", "age_leptokarya"}
 EXCLUDE_ALL_WEBCODES = {"pws_gebze"}
 
 
