@@ -716,7 +716,7 @@ excluded_exact_year = {
     "agrivate_stavroupoli", "age_dasosxiromerou",
     "agrivate_rizia", "age_agiosilias",
     "hnms3_megara", "wu_varnavas", "wu_sykamino", "wu_avlonas",
-    "age_galatas", "agrivate_messouni", "voutsaras", "pws_proti2", "age_vrana", "potamoi"
+    "age_galatas", "agrivate_messouni", "voutsaras", "pws_proti2", "age_vrana", "potamoi", "age_leptokarya"
 }
 excluded_prefixes_year = ("hcmr", "uoi_")
 
