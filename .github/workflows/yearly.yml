@@ -1,0 +1,64 @@
+name: Yearly maps
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: yearly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  generate-yearly-maps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      MPLBACKEND: Agg
+      CURRENTYEARURL: ${{ secrets.CURRENTYEARURL }}
+      FTP_HOST: ${{ secrets.FTP_HOST }}
+      FTP_USER: ${{ secrets.FTP_USER }}
+      FTP_PASS: ${{ secrets.FTP_PASS }}
+      GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-yearly-${{ hashFiles('.github/workflows/yearly.yml', 'yearly.py') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-yearly-
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install --only-binary=:all: \
+            numpy pandas matplotlib scipy requests \
+            shapely pyproj fiona geopandas pyogrio rasterio
+
+      - name: Decrypt greece.geojson if needed
+        if: ${{ hashFiles('greece.geojson') == '' }}
+        run: |
+          test -f greece.geojson.enc || { echo "greece.geojson.enc missing"; exit 1; }
+          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in greece.geojson.enc \
+            -out greece.geojson \
+            -pass pass:"${GEOJSON_PASS}"
+          ls -l greece.geojson
+
+      - name: Run yearly.py
+        run: |
+          python -V
+          python yearly.py
