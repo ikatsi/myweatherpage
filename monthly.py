@@ -4,6 +4,8 @@
 import os
 import re
 import io
+import zipfile
+import subprocess
 from io import StringIO
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -20,10 +22,13 @@ matplotlib.rcParams["font.family"] = "DejaVu Sans"
 matplotlib.rcParams["axes.unicode_minus"] = False
 
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap, BoundaryNorm
+from matplotlib.colors import ListedColormap, BoundaryNorm, LinearSegmentedColormap, Normalize
 import matplotlib.patheffects as pe
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 
 import requests
+import rasterio
+from pyproj import Transformer
 
 
 # ======================
@@ -31,6 +36,7 @@ import requests
 # ======================
 TXT_URL = os.environ.get("CURRENTMONTHURL", "").strip()
 GEOJSON_PATH = "greece.geojson"
+DEM_PATH = "GRC_alt.vrt"
 
 FTP_HOST = os.environ.get("FTP_HOST", "").strip()
 FTP_USER = os.environ.get("FTP_USER", "").strip()
@@ -47,6 +53,39 @@ TOP_FONTSIZE = 7.0
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 TIMEOUT = 15
 
+BASE_DIR = os.path.abspath(os.path.dirname(__file__) or ".")
+ALT_ENC = os.path.join(BASE_DIR, "altitude.zip.enc")
+ALT_ZIP = os.path.join(BASE_DIR, "altitude.zip")
+
+CRS_WGS84 = "EPSG:4326"
+CRS_EGSA87 = "EPSG:2100"
+WGS_TO_EGSA = Transformer.from_crs(CRS_WGS84, CRS_EGSA87, always_xy=True)
+EGSA_TO_WGS = Transformer.from_crs(CRS_EGSA87, CRS_WGS84, always_xy=True)
+
+# Regional temperature interpolation settings in meters
+REG_IDW_K = 8
+REG_IDW_POWER = 2
+REG_MAX_DISTANCE_M = 120_000
+REG_MIN_NEIGHBORS = 3
+REG_DISTANCE_MASK_M = 170_000
+
+# Monthly mean temperature lapse-rate settings
+# Rationale:
+# For monthly mean temperature, altitude still matters strongly,
+# but the field should be smoother and less "weather-noisy" than TNow.
+# Therefore we keep lapse-rate correction, but do NOT use:
+# - cold-pool logic
+# - wind/RH adjustments
+# - min/max neighbor envelopes
+# This gives a terrain-adjusted monthly mean field, not a snapshot field.
+LAPSE_DEFAULT = -0.0065
+LAPSE_MIN = -0.0100
+LAPSE_MAX = 0.0020
+LAPSE_K = 20
+LAPSE_RADIUS_M = 150_000
+LAPSE_MIN_NBR = 6
+LAPSE_ALT_RANGE_MIN_M = 150
+
 if not TXT_URL:
     raise RuntimeError("Environment variable CURRENTMONTHURL is not set.")
 
@@ -62,32 +101,44 @@ REGIONS = [
         "key": "greece",
         "title": "Υπολογ. σωρευτικός υετός στην Ελλάδα (τρέχων μήνας)",
         "outfile": "monthlyppn.png",
+        "temp_title": "Μέση θερμοκρασία στην Ελλάδα (τρέχων μήνας, προσαρμογή υψομέτρου)",
+        "temp_outfile": "monthlytavg.png",
         "lon_min": 19.0,  "lon_max": 30.0,
-        "lat_min": 34.5,  "lat_max": 42.5
+        "lat_min": 34.5,  "lat_max": 42.5,
+        "temp_mode": "wgs84"
     },
     {
         "key": "attica",
         "title": "Υπολογ. σωρευτικός υετός Αττικής (τρέχων μήνας)",
         "outfile": "monthlyppn_attica.png",
+        "temp_title": "Μέση θερμοκρασία Αττικής (τρέχων μήνας, προσαρμογή υψομέτρου)",
+        "temp_outfile": "monthlytavg_attica.png",
         "lon_min": 22.7,  "lon_max": 25.0,
-        "lat_min": 37.5,  "lat_max": 38.7
+        "lat_min": 37.5,  "lat_max": 38.7,
+        "temp_mode": "egsa"
     },
     {
         "key": "negreece",
         "title": "Υπολογ. σωρευτικός υετός ΒΑ Ελλάδας (τρέχων μήνας)",
         "outfile": "monthlyppn_negreece.png",
+        "temp_title": "Μέση θερμοκρασία ΒΑ Ελλάδας (τρέχων μήνας, προσαρμογή υψομέτρου)",
+        "temp_outfile": "monthlytavg_negreece.png",
         "lon_min": 22.0,  "lon_max": 26.6,
         "lat_min": 39.7,  "lat_max": 41.8,
         "top_n": 15,
-        "top_loc": "bottom_right"
+        "top_loc": "bottom_right",
+        "temp_mode": "egsa"
     },
     {
         "key": "crete",
         "title": "Υπολογ. σωρευτικός υετός Κρήτης (τρέχων μήνας)",
         "outfile": "monthlyppn_crete.png",
+        "temp_title": "Μέση θερμοκρασία Κρήτης (τρέχων μήνας, προσαρμογή υψομέτρου)",
+        "temp_outfile": "monthlytavg_crete.png",
         "lon_min": 23.37, "lon_max": 26.4,
         "lat_min": 34.7,  "lat_max": 35.78,
-        "top_n": 12
+        "top_n": 12,
+        "temp_mode": "egsa"
     },
 ]
 
@@ -144,6 +195,13 @@ def fmt_mm_gr(x):
         return ""
 
 
+def fmt_c_gr(x):
+    try:
+        return f"{float(x):.1f}".replace(".", ",")
+    except Exception:
+        return ""
+
+
 def idw_optimized(x, y, z, xi, yi, power=2, k=8):
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -166,6 +224,49 @@ def idw_optimized(x, y, z, xi, yi, power=2, k=8):
         weights[dist == 0] = 1e12
         zi = np.sum(weights * z[idx], axis=1) / np.sum(weights, axis=1)
 
+    return zi.reshape(xi.shape)
+
+
+def idw_fast(x, y, z, xi, yi, k=8, power=2, max_distance=1.0, min_neighbors=3):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    z = np.asarray(z, dtype=float)
+    n = len(z)
+
+    if n == 0:
+        return np.full(xi.shape, np.nan, dtype=float)
+
+    tree = cKDTree(np.c_[x, y])
+    dist, idx = tree.query(
+        np.c_[xi.ravel(), yi.ravel()],
+        k=min(k, n),
+        distance_upper_bound=max_distance
+    )
+
+    if dist.ndim == 1:
+        dist = dist[:, None]
+        idx = idx[:, None]
+
+    finite = np.isfinite(dist) & (idx < n)
+    neigh_count = np.sum(finite, axis=1)
+
+    zi = np.full(xi.size, np.nan, dtype=float)
+    ok_pts = neigh_count >= min_neighbors
+    if not np.any(ok_pts):
+        return zi.reshape(xi.shape)
+
+    idx_safe = np.where(finite, idx, 0)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = np.where(dist == 0, 1e12, 1.0 / (dist ** power))
+        w = np.where(np.isfinite(w) & finite, w, 0.0)
+
+    z_nei = z[idx_safe]
+    num = np.sum(w * z_nei, axis=1)
+    den = np.sum(w, axis=1)
+
+    zi_ok = np.where(den > 0, num / den, np.nan)
+    zi[ok_pts] = zi_ok[ok_pts]
     return zi.reshape(xi.shape)
 
 
@@ -195,6 +296,25 @@ def build_top_text(region_df, top_n):
     return "\n".join(lines)
 
 
+def build_temp_top_text(region_df, top_n):
+    top_source = region_df.dropna(subset=["avg_tavg"]).copy()
+    if top_source.empty:
+        return ""
+
+    hotn = top_source.nlargest(int(top_n), "avg_tavg")
+    lines = []
+
+    for _, r in hotn.iterrows():
+        name, is_citygr = station_name(r)
+        if is_citygr:
+            name = abbreviate_gr_name(name)
+        tv = fmt_c_gr(r["avg_tavg"])
+        if name and tv:
+            lines.append(f"{name} {tv}°C")
+
+    return "\n".join(lines)
+
+
 def upload_to_ftp(file_buffer, filename):
     try:
         ftps = FTP_TLS()
@@ -209,7 +329,267 @@ def upload_to_ftp(file_buffer, filename):
         print("⚠️ FTP upload failed for {}: {}".format(filename, e))
 
 
+def ensure_altitude_bundle():
+    if os.path.exists(DEM_PATH):
+        return
 
+    if not os.path.exists(ALT_ENC):
+        raise RuntimeError(
+            "GRC_alt.vrt not found and altitude.zip.enc is also missing. "
+            "Monthly temperature maps need the DEM bundle."
+        )
+
+    if not GEOJSON_PASS:
+        raise RuntimeError("GEOJSON_PASS not set, cannot decrypt altitude.zip.enc")
+
+    try:
+        subprocess.check_call([
+            "openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2",
+            "-in", ALT_ENC, "-out", ALT_ZIP, "-pass", "pass:" + GEOJSON_PASS
+        ])
+    except FileNotFoundError:
+        raise RuntimeError("OpenSSL not found. Install it or decrypt altitude.zip.enc in the workflow.")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError("OpenSSL decryption failed for altitude.zip.enc: {}".format(e))
+
+    with zipfile.ZipFile(ALT_ZIP, "r") as zf:
+        zf.extractall(BASE_DIR)
+
+    if not os.path.exists(DEM_PATH):
+        raise RuntimeError("Decrypted bundle did not contain GRC_alt.vrt")
+
+    try:
+        os.remove(ALT_ZIP)
+    except Exception:
+        pass
+
+
+def sample_dem_lonlat(dem_path, lons, lats):
+    if not os.path.exists(dem_path):
+        raise FileNotFoundError("DEM not found at: {}".format(dem_path))
+
+    lons = np.asarray(lons, dtype=float)
+    lats = np.asarray(lats, dtype=float)
+
+    with rasterio.open(dem_path) as src:
+        nodata = src.nodata
+        samples = list(src.sample(zip(lons.tolist(), lats.tolist())))
+        elev = np.array([s[0] for s in samples], dtype=float)
+
+        if nodata is not None:
+            elev = np.where(elev == nodata, np.nan, elev)
+        elev = np.where(elev < -100, np.nan, elev)
+        elev = np.where(np.isfinite(elev), elev, 0.0)
+
+    return elev
+
+
+def build_geo_mask_wgs(grid_x, grid_y, greece_gdf_wgs):
+    if hasattr(greece_gdf_wgs.geometry, "union_all"):
+        boundary = greece_gdf_wgs.geometry.union_all()
+    else:
+        boundary = greece_gdf_wgs.unary_union
+
+    pts = gpd.GeoDataFrame(
+        geometry=gpd.points_from_xy(grid_x.ravel(), grid_y.ravel()),
+        crs=greece_gdf_wgs.crs
+    )
+    return pts.geometry.within(boundary).values.reshape(grid_x.shape)
+
+
+def build_distance_mask(xgrid, ygrid, xs, ys, max_dist):
+    tree = cKDTree(np.c_[xs, ys])
+    d, _ = tree.query(np.c_[xgrid.ravel(), ygrid.ravel()])
+    return (d.reshape(xgrid.shape) <= max_dist)
+
+
+def estimate_local_lapse_rates_wgs(st_lons, st_lats, st_temp, st_elev,
+                                   k=12, max_deg=1.2,
+                                   default_lapse=LAPSE_DEFAULT,
+                                   clip_min=LAPSE_MIN, clip_max=LAPSE_MAX):
+    tree = cKDTree(np.c_[st_lons, st_lats])
+    d, idx = tree.query(np.c_[st_lons, st_lats], k=min(k, len(st_temp)), distance_upper_bound=max_deg)
+
+    if d.ndim == 1:
+        d = d[:, None]
+        idx = idx[:, None]
+
+    lapses = np.full(len(st_temp), np.nan, dtype=float)
+
+    for i in range(len(st_temp)):
+        neigh = idx[i]
+        dist = d[i]
+        ok = np.isfinite(dist) & (neigh < len(st_temp))
+        neigh = neigh[ok]
+
+        if neigh.size < 4:
+            lapses[i] = default_lapse
+            continue
+
+        elev_n = st_elev[neigh]
+        t_n = st_temp[neigh]
+        good = np.isfinite(elev_n) & np.isfinite(t_n)
+
+        elev_n = elev_n[good]
+        t_n = t_n[good]
+
+        if elev_n.size < 4 or (float(np.nanmax(elev_n)) - float(np.nanmin(elev_n))) < 100:
+            lapses[i] = default_lapse
+            continue
+
+        try:
+            b, _a = np.polyfit(elev_n, t_n, 1)
+            b = float(np.clip(b, clip_min, clip_max))
+            lapses[i] = b
+        except Exception:
+            lapses[i] = default_lapse
+
+    return lapses
+
+
+def estimate_local_lapse_rates_egsa(st_x, st_y, st_temp, st_elev,
+                                    k=LAPSE_K, radius_m=LAPSE_RADIUS_M,
+                                    default_lapse=LAPSE_DEFAULT,
+                                    clip_min=LAPSE_MIN, clip_max=LAPSE_MAX):
+    st_x = np.asarray(st_x, dtype=float)
+    st_y = np.asarray(st_y, dtype=float)
+    st_temp = np.asarray(st_temp, dtype=float)
+    st_elev = np.asarray(st_elev, dtype=float)
+
+    tree = cKDTree(np.c_[st_x, st_y])
+    d, idx = tree.query(np.c_[st_x, st_y], k=min(k, len(st_temp)), distance_upper_bound=radius_m)
+
+    if d.ndim == 1:
+        d = d[:, None]
+        idx = idx[:, None]
+
+    lapses = np.full(len(st_temp), np.nan, dtype=float)
+
+    for i in range(len(st_temp)):
+        neigh = idx[i]
+        dist = d[i]
+        ok = np.isfinite(dist) & (neigh < len(st_temp))
+        neigh = neigh[ok]
+
+        if neigh.size < LAPSE_MIN_NBR:
+            lapses[i] = default_lapse
+            continue
+
+        elev_n = st_elev[neigh]
+        t_n = st_temp[neigh]
+        good = np.isfinite(elev_n) & np.isfinite(t_n)
+        elev_n = elev_n[good]
+        t_n = t_n[good]
+
+        if elev_n.size < LAPSE_MIN_NBR or (np.nanmax(elev_n) - np.nanmin(elev_n)) < LAPSE_ALT_RANGE_MIN_M:
+            lapses[i] = default_lapse
+            continue
+
+        try:
+            b, _a = np.polyfit(elev_n, t_n, 1)
+            b = float(np.clip(b, clip_min, clip_max))
+            lapses[i] = b
+        except Exception:
+            lapses[i] = default_lapse
+
+    return lapses
+
+
+def add_temp_contours(ax, X, Y, field):
+    levels = np.arange(-30, 46, 3, dtype=float)
+    thin_levels = [lv for lv in levels if abs(lv) > 1e-9]
+
+    cs_thin = None
+    cs_zero = None
+
+    try:
+        cs_thin = ax.contour(
+            X, Y, field,
+            levels=thin_levels,
+            colors="black",
+            linewidths=0.6,
+            alpha=0.70
+        )
+    except Exception:
+        cs_thin = None
+
+    try:
+        cs_zero = ax.contour(
+            X, Y, field,
+            levels=[0.0],
+            colors="black",
+            linewidths=1.3,
+            alpha=0.95
+        )
+    except Exception:
+        cs_zero = None
+
+    if cs_thin is not None:
+        try:
+            texts = ax.clabel(
+                cs_thin,
+                levels=cs_thin.levels[:],
+                inline=True,
+                inline_spacing=2,
+                fmt="%d",
+                fontsize=7
+            )
+            for t in texts:
+                t.set_path_effects([pe.withStroke(linewidth=2.0, foreground="white")])
+        except Exception:
+            pass
+
+    if cs_zero is not None:
+        try:
+            texts0 = ax.clabel(
+                cs_zero,
+                inline=True,
+                inline_spacing=2,
+                fmt="0",
+                fontsize=7
+            )
+            for t in texts0:
+                t.set_path_effects([pe.withStroke(linewidth=2.0, foreground="white")])
+        except Exception:
+            pass
+
+
+# ======================
+# SHARED TEMP PALETTE
+# SAME AS TNOW
+# ======================
+TEMP_VMIN = -25.0
+TEMP_VMAX = 45.0
+
+
+def build_shared_temp_cmap_norm():
+    anchors = [
+        (-25.0, "#0b1d5c"),
+        (-18.0, "#123b8a"),
+        (-12.0, "#1f63c6"),
+        (-6.0,  "#2f8fe6"),
+        (-2.0,  "#44b6ff"),
+        (0.0,   "#2b7bff"),
+        (3.0,   "#2fb8d6"),
+        (7.0,   "#2fc4a0"),
+        (12.0,  "#34c759"),
+        (18.0,  "#b7dd2a"),
+        (24.0,  "#ffe11a"),
+        (30.0,  "#ff9a1a"),
+        (35.0,  "#ff4d1a"),
+        (40.0,  "#d1166f"),
+        (45.0,  "#6a00a8"),
+    ]
+    vals = np.array([v for v, _ in anchors], dtype=float)
+    cols = [c for _, c in anchors]
+    t = (vals - TEMP_VMIN) / (TEMP_VMAX - TEMP_VMIN)
+    t = np.clip(t, 0.0, 1.0)
+    cmap = LinearSegmentedColormap.from_list("t_shared", list(zip(t, cols)), N=256)
+    norm = Normalize(vmin=TEMP_VMIN, vmax=TEMP_VMAX, clip=True)
+    return cmap, norm
+
+
+TEMP_CMAP, TEMP_NORM = build_shared_temp_cmap_norm()
 
 
 # ======================
@@ -256,6 +636,11 @@ if "total_precipitation_missing" in data.columns:
 else:
     data["total_precipitation_missing"] = np.nan
 
+if "avg_tavg" in data.columns:
+    data["avg_tavg"] = pd.to_numeric(data["avg_tavg"], errors="coerce")
+else:
+    data["avg_tavg"] = np.nan
+
 # Remove missing coordinates
 data = data.dropna(subset=["latitude", "longitude"]).copy()
 
@@ -286,21 +671,22 @@ else:
 
 
 # ======================
-# COLORS / LEVELS
+# PRECIPITATION COLORS / LEVELS
+# KEEP AS-IS
 # ======================
 cmap = ListedColormap([
-    "#ffffff",  # 0–0.1
-    "#e3f2fd",  # 0.1–5
-    "#90caf9",  # 5–10
-    "#64b5f6",  # 10–20
-    "#42a5f5",  # 20–30
-    "#1e88e5",  # 30–50
-    "#6a1b9a",  # 50–75
-    "#b71c1c",  # 75–100
-    "#d32f2f",  # 100–150
-    "#fb8c00",  # 150–200
-    "#fdd835",  # 200–300
-    "#ffe082"   # 300+
+    "#ffffff",
+    "#e3f2fd",
+    "#90caf9",
+    "#64b5f6",
+    "#42a5f5",
+    "#1e88e5",
+    "#6a1b9a",
+    "#b71c1c",
+    "#d32f2f",
+    "#fb8c00",
+    "#fdd835",
+    "#ffe082"
 ])
 
 bounds = [0, 0.1, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300, 1000]
@@ -309,81 +695,103 @@ contour_levels = [0.2, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300]
 
 
 # ======================
-# RUN ALL REGIONS
+# TEMPERATURE RENDERERS
 # ======================
-timestamp = athens_now.strftime("%Y-%m-%d %H:%M %Z")
-timestamp_text = "Δημιουργήθηκε για το e-kairos.gr\n" + timestamp
+def plot_monthly_tavg_greece_wgs(region_df, reg, greece_gdf_wgs, athens_now):
+    """
+    Monthly mean temperature rationale:
+    - use direct station monthly mean temperature (avg_tavg), not derived from extremes
+    - de-altitude each station to a sea-level equivalent monthly mean
+    - interpolate sea-level field + local lapse-rate field
+    - restore altitude with DEM
+    - do not use instantaneous logic (cold pools, wind/RH gating, envelope fields)
+    """
+    if "avg_tavg" not in region_df.columns:
+        print("⚠️ avg_tavg missing -> skipping:", reg["key"])
+        return
 
-for reg in REGIONS:
+    tt = region_df.dropna(subset=["avg_tavg", "latitude", "longitude"]).copy()
+    if tt.empty:
+        print("⚠️ No monthly avg_tavg data for region:", reg["key"])
+        return
+
     lon_min = reg["lon_min"]
     lon_max = reg["lon_max"]
     lat_min = reg["lat_min"]
     lat_max = reg["lat_max"]
-
-    region_df = bbox_filter(data, lon_min, lon_max, lat_min, lat_max)
-
-    map_data = region_df.dropna(
-        subset=["total_precipitation", "latitude", "longitude"]
-    ).copy()
-
-    if map_data.empty:
-        print("⚠️ No strict monthly data for region:", reg["key"], "-> skipping map")
-        continue
-
-    top_n = int(reg.get("top_n", TOP_N))
-    top_text = build_top_text(region_df, top_n)
 
     grid_x, grid_y = np.meshgrid(
         np.linspace(lon_min, lon_max, GRID_N),
         np.linspace(lat_min, lat_max, GRID_N)
     )
 
-    lats = map_data["latitude"].to_numpy(dtype=float)
-    lons = map_data["longitude"].to_numpy(dtype=float)
-    values = map_data["total_precipitation"].to_numpy(dtype=float)
+    st_lons = tt["longitude"].to_numpy(dtype=float)
+    st_lats = tt["latitude"].to_numpy(dtype=float)
+    st_t = tt["avg_tavg"].to_numpy(dtype=float)
 
-    grid_intensity = idw_optimized(lons, lats, values, grid_x, grid_y)
+    st_elev = sample_dem_lonlat(DEM_PATH, st_lons, st_lats)
 
-    grid_points = gpd.GeoDataFrame(
-        geometry=gpd.points_from_xy(grid_x.ravel(), grid_y.ravel()),
-        crs="EPSG:4326"
+    ok = np.isfinite(st_lons) & np.isfinite(st_lats) & np.isfinite(st_t) & np.isfinite(st_elev)
+    st_lons = st_lons[ok]
+    st_lats = st_lats[ok]
+    st_t = st_t[ok]
+    st_elev = st_elev[ok]
+
+    if len(st_t) < 5:
+        print("⚠️ Too few stations for monthly avg_tavg in region:", reg["key"])
+        return
+
+    st_lapse = estimate_local_lapse_rates_wgs(st_lons, st_lats, st_t, st_elev)
+    st_t0 = st_t - (st_lapse * st_elev)
+
+    t0_grid = idw_fast(
+        st_lons, st_lats, st_t0, grid_x, grid_y,
+        k=8, power=2, max_distance=1.2, min_neighbors=3
     )
-    mask_bool = grid_points.geometry.within(greece_union).to_numpy()
-    mask_2d = mask_bool.reshape(grid_x.shape)
+    lapse_grid = idw_fast(
+        st_lons, st_lats, st_lapse, grid_x, grid_y,
+        k=8, power=2, max_distance=1.2, min_neighbors=3
+    )
 
-    masked_intensity = np.full(grid_x.shape, np.nan)
-    masked_intensity[mask_2d] = grid_intensity[mask_2d]
+    grid_elev = sample_dem_lonlat(DEM_PATH, grid_x.ravel(), grid_y.ravel()).reshape(grid_x.shape)
+    t_grid = t0_grid + (lapse_grid * grid_elev)
+
+    geo_mask = build_geo_mask_wgs(grid_x, grid_y, greece_gdf_wgs)
+    dist_mask = build_distance_mask(grid_x, grid_y, st_lons, st_lats, max_dist=0.8)
+    final_mask = geo_mask & dist_mask & np.isfinite(grid_elev)
+
+    out = np.full(grid_x.shape, np.nan, dtype=float)
+    out[final_mask] = t_grid[final_mask]
 
     fig, ax = plt.subplots(figsize=(PLOT_WIDTH, PLOT_HEIGHT))
 
     img = ax.imshow(
-        masked_intensity,
+        np.ma.masked_invalid(out),
         extent=(lon_min, lon_max, lat_min, lat_max),
         origin="lower",
-        cmap=cmap,
-        norm=norm,
-        alpha=0.7
+        cmap=TEMP_CMAP,
+        norm=TEMP_NORM,
+        alpha=0.95
     )
 
-    greece_clip = greece.cx[lon_min:lon_max, lat_min:lat_max]
+    greece_clip = greece_gdf_wgs.cx[lon_min:lon_max, lat_min:lat_max]
     if not greece_clip.empty:
         greece_clip.boundary.plot(ax=ax, color="black", linewidth=0.5)
 
+    add_temp_contours(ax, grid_x, grid_y, out)
+
+    cbar = plt.colorbar(img, ax=ax, orientation="vertical", extend="both")
+    cbar.set_ticks([-25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30, 35, 40, 45])
+    cbar.set_label("Μέση θερμοκρασία μήνα (°C)", fontsize=12)
+
     ax.set_xlim(lon_min, lon_max)
     ax.set_ylim(lat_min, lat_max)
-
-    ax.contour(
-        grid_x, grid_y, masked_intensity,
-        levels=contour_levels, colors="black", linewidths=0.5
-    )
-
-    cbar = plt.colorbar(img, ax=ax, orientation="vertical", boundaries=bounds)
-    cbar.set_ticks([0, 0.1, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300])
-    cbar.set_label("Σωρευτικός υετός μήνα (mm)", fontsize=12)
-
-    ax.set_title(reg["title"], fontsize=16)
+    ax.set_title(reg["temp_title"], fontsize=16)
     ax.set_xlabel("Γεωγραφικό μήκος", fontsize=12)
     ax.set_ylabel("Γεωγραφικό πλάτος", fontsize=12)
+
+    timestamp = athens_now.strftime("%Y-%m-%d %H:%M %Z")
+    timestamp_text = "Δημιουργήθηκε για το e-kairos.gr\n" + timestamp
 
     ts = ax.text(
         0.01, 0.01, timestamp_text, transform=ax.transAxes,
@@ -392,9 +800,25 @@ for reg in REGIONS:
     )
     ts.set_path_effects([pe.withStroke(linewidth=3.0, foreground="white")])
 
+    if np.isfinite(out).any():
+        interp_min = float(np.nanmin(out))
+        interp_max = float(np.nanmax(out))
+        mm_text = "Εύρος παρεμβολής (ξηρά):\n{0:.1f} έως {1:.1f}°C".format(interp_min, interp_max)
+        tx = ax.text(
+            0.01, 0.985, mm_text,
+            transform=ax.transAxes,
+            ha="left", va="top",
+            fontsize=11,
+            color="black",
+            bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.2")
+        )
+        tx.set_path_effects([pe.withStroke(linewidth=3.0, foreground="white")])
+
+    top_n = int(reg.get("top_n", TOP_N))
+    top_text = build_temp_top_text(region_df, top_n)
+
     if top_text.strip():
         top_loc = reg.get("top_loc", "top_right")
-
         if top_loc == "bottom_right":
             x, y = 0.99, 0.01
             ha, va = "right", "bottom"
@@ -402,7 +826,7 @@ for reg in REGIONS:
             x, y = 0.99, 0.99
             ha, va = "right", "top"
 
-        top_block = f"Υψηλότερα ποσά (Top {top_n}):\n─────────────────────\n" + top_text
+        top_block = f"Υψηλότερες μέσες Τ (Top {top_n}):\n─────────────────────\n" + top_text
 
         txt = ax.text(
             x, y, top_block, transform=ax.transAxes,
@@ -415,7 +839,348 @@ for reg in REGIONS:
     fig.savefig(buffer_main, format="png", dpi=300, bbox_inches="tight")
     plt.close(fig)
 
-    upload_to_ftp(buffer_main, reg["outfile"])
-    print("✅ Region monthly map uploaded:", reg["outfile"])
+    upload_to_ftp(buffer_main, reg["temp_outfile"])
+    print("✅ Region monthly tavg map uploaded:", reg["temp_outfile"])
 
-print("✅ Done (current month precipitation, all regions processed).")
+
+def plot_monthly_tavg_region_egsa(region_df, reg, greece_gdf_wgs, athens_now):
+    if "avg_tavg" not in region_df.columns:
+        print("⚠️ avg_tavg missing -> skipping:", reg["key"])
+        return
+
+    tt = region_df.dropna(subset=["avg_tavg", "latitude", "longitude"]).copy()
+    if tt.empty:
+        print("⚠️ No monthly avg_tavg data for region:", reg["key"])
+        return
+
+    lon_min = reg["lon_min"]
+    lon_max = reg["lon_max"]
+    lat_min = reg["lat_min"]
+    lat_max = reg["lat_max"]
+
+    corners_lon = [lon_min, lon_min, lon_max, lon_max]
+    corners_lat = [lat_min, lat_max, lat_min, lat_max]
+    cx, cy = WGS_TO_EGSA.transform(corners_lon, corners_lat)
+    x_min, x_max = float(np.min(cx)), float(np.max(cx))
+    y_min, y_max = float(np.min(cy)), float(np.max(cy))
+
+    st_lon = tt["longitude"].to_numpy(dtype=float)
+    st_lat = tt["latitude"].to_numpy(dtype=float)
+    st_t = tt["avg_tavg"].to_numpy(dtype=float)
+
+    st_x, st_y = WGS_TO_EGSA.transform(st_lon.tolist(), st_lat.tolist())
+    st_x = np.asarray(st_x, dtype=float)
+    st_y = np.asarray(st_y, dtype=float)
+
+    buf = 200_000.0
+    near = (
+        (st_x >= (x_min - buf)) & (st_x <= (x_max + buf))
+        & (st_y >= (y_min - buf)) & (st_y <= (y_max + buf))
+    )
+
+    st_lon = st_lon[near]
+    st_lat = st_lat[near]
+    st_t = st_t[near]
+    st_x = st_x[near]
+    st_y = st_y[near]
+
+    if len(st_t) < 8:
+        print("⚠️ Too few nearby stations for monthly avg_tavg in region:", reg["key"])
+        return
+
+    st_elev = sample_dem_lonlat(DEM_PATH, st_lon, st_lat)
+
+    ok = np.isfinite(st_t) & np.isfinite(st_x) & np.isfinite(st_y) & np.isfinite(st_elev)
+    st_t = st_t[ok]
+    st_x = st_x[ok]
+    st_y = st_y[ok]
+    st_elev = st_elev[ok]
+
+    if len(st_t) < 8:
+        print("⚠️ Too few valid stations after DEM for region:", reg["key"])
+        return
+
+    # Rationale:
+    # For monthly mean temperature we use the same terrain-aware core idea as TNow:
+    # 1) estimate station-level lapse rates from local station neighborhoods
+    # 2) convert each station monthly mean temperature to a sea-level equivalent (t0)
+    # 3) interpolate t0 and lapse in projected metric space
+    # 4) restore elevation effect with DEM on the grid
+    # This preserves orographic thermal structure without importing TNow-only transient logic.
+    st_lapse = estimate_local_lapse_rates_egsa(st_x, st_y, st_t, st_elev)
+    st_t0 = st_t - (st_lapse * st_elev)
+
+    grid_x_m, grid_y_m = np.meshgrid(
+        np.linspace(x_min, x_max, GRID_N),
+        np.linspace(y_min, y_max, GRID_N)
+    )
+
+    t0_grid = idw_fast(
+        st_x, st_y, st_t0, grid_x_m, grid_y_m,
+        k=REG_IDW_K, power=REG_IDW_POWER,
+        max_distance=REG_MAX_DISTANCE_M, min_neighbors=REG_MIN_NEIGHBORS
+    )
+
+    lapse_grid = idw_fast(
+        st_x, st_y, st_lapse, grid_x_m, grid_y_m,
+        k=REG_IDW_K, power=REG_IDW_POWER,
+        max_distance=REG_MAX_DISTANCE_M, min_neighbors=REG_MIN_NEIGHBORS
+    )
+
+    glon, glat = EGSA_TO_WGS.transform(grid_x_m.ravel().tolist(), grid_y_m.ravel().tolist())
+    grid_elev = sample_dem_lonlat(
+        DEM_PATH,
+        np.array(glon, dtype=float),
+        np.array(glat, dtype=float)
+    ).reshape(grid_x_m.shape)
+
+    t_grid = t0_grid + (lapse_grid * grid_elev)
+
+    greece_egsa = greece_gdf_wgs.to_crs(CRS_EGSA87)
+    greece_clip = greece_egsa.cx[x_min:x_max, y_min:y_max].copy()
+
+    if hasattr(greece_clip.geometry, "union_all"):
+        boundary = greece_clip.geometry.union_all()
+    else:
+        boundary = greece_clip.geometry.unary_union
+
+    grid_pts = gpd.GeoDataFrame(
+        geometry=gpd.points_from_xy(grid_x_m.ravel(), grid_y_m.ravel()),
+        crs=CRS_EGSA87
+    )
+    geo_mask = grid_pts.geometry.within(boundary).values.reshape(grid_x_m.shape)
+
+    tree = cKDTree(np.c_[st_x, st_y])
+    d, _ = tree.query(np.c_[grid_x_m.ravel(), grid_y_m.ravel()])
+    dist_mask = (d.reshape(grid_x_m.shape) <= REG_DISTANCE_MASK_M)
+
+    final_mask = geo_mask & dist_mask & np.isfinite(grid_elev)
+
+    out = np.full(grid_x_m.shape, np.nan, dtype=float)
+    out[final_mask] = t_grid[final_mask]
+
+    fig, ax = plt.subplots(figsize=(10, 10), dpi=300)
+
+    img = ax.imshow(
+        np.ma.masked_invalid(out),
+        extent=(x_min, x_max, y_min, y_max),
+        origin="lower",
+        cmap=TEMP_CMAP,
+        norm=TEMP_NORM,
+        alpha=0.95
+    )
+
+    if not greece_clip.empty:
+        greece_clip.boundary.plot(ax=ax, color="black", linewidth=0.6)
+
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_aspect("equal", adjustable="box")
+
+    y_ref_for_lon = y_min
+    x_ref_for_lat = x_min
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+
+    def fmt_lon(x, pos):
+        lon, _lat = EGSA_TO_WGS.transform(x, y_ref_for_lon)
+        return f"{lon:.2f}"
+
+    def fmt_lat(y, pos):
+        _lon, lat = EGSA_TO_WGS.transform(x_ref_for_lat, y)
+        return f"{lat:.2f}"
+
+    ax.xaxis.set_major_formatter(FuncFormatter(fmt_lon))
+    ax.yaxis.set_major_formatter(FuncFormatter(fmt_lat))
+
+    ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
+    ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
+
+    add_temp_contours(ax, grid_x_m, grid_y_m, out)
+
+    cbar = fig.colorbar(img, ax=ax, orientation="vertical", extend="both", fraction=0.035, pad=0.02)
+    cbar.set_ticks([-25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30, 35, 40, 45])
+    cbar.set_label("Μέση θερμοκρασία μήνα (°C)", fontsize=12)
+
+    ax.set_title(reg["temp_title"], fontsize=16, pad=10)
+
+    timestamp = athens_now.strftime("%Y-%m-%d %H:%M %Z")
+    timestamp_text = "Δημιουργήθηκε για το e-kairos.gr\n" + timestamp
+
+    ts = ax.text(
+        0.01, 0.01, timestamp_text,
+        transform=ax.transAxes, fontsize=9, color="black",
+        ha="left", va="bottom",
+        bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.3")
+    )
+    ts.set_path_effects([pe.withStroke(linewidth=2.0, foreground="white")])
+
+    if np.isfinite(out).any():
+        interp_min = float(np.nanmin(out))
+        interp_max = float(np.nanmax(out))
+        mm_text = "Εύρος παρεμβολής (ξηρά):\n{0:.1f} έως {1:.1f}°C".format(interp_min, interp_max)
+        tx = ax.text(
+            0.01, 0.985, mm_text,
+            transform=ax.transAxes,
+            ha="left", va="top",
+            fontsize=11,
+            color="black",
+            bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.2")
+        )
+        tx.set_path_effects([pe.withStroke(linewidth=3.0, foreground="white")])
+
+    top_n = int(reg.get("top_n", TOP_N))
+    top_text = build_temp_top_text(region_df, top_n)
+
+    if top_text.strip():
+        top_loc = reg.get("top_loc", "top_right")
+        if top_loc == "bottom_right":
+            x, y = 0.99, 0.01
+            ha, va = "right", "bottom"
+        else:
+            x, y = 0.99, 0.99
+            ha, va = "right", "top"
+
+        top_block = f"Υψηλότερες μέσες Τ (Top {top_n}):\n─────────────────────\n" + top_text
+
+        txt = ax.text(
+            x, y, top_block, transform=ax.transAxes,
+            fontsize=TOP_FONTSIZE, color="black", ha=ha, va=va,
+            bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.22")
+        )
+        txt.set_path_effects([pe.withStroke(linewidth=2.2, foreground="white")])
+
+    buffer_main = io.BytesIO()
+    fig.savefig(buffer_main, format="png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    upload_to_ftp(buffer_main, reg["temp_outfile"])
+    print("✅ Region monthly tavg map uploaded:", reg["temp_outfile"])
+
+
+# ======================
+# RUN ALL REGIONS
+# ======================
+timestamp = athens_now.strftime("%Y-%m-%d %H:%M %Z")
+timestamp_text = "Δημιουργήθηκε για το e-kairos.gr\n" + timestamp
+
+# DEM is needed only for the added temperature maps
+ensure_altitude_bundle()
+
+for reg in REGIONS:
+    lon_min = reg["lon_min"]
+    lon_max = reg["lon_max"]
+    lat_min = reg["lat_min"]
+    lat_max = reg["lat_max"]
+
+    region_df = bbox_filter(data, lon_min, lon_max, lat_min, lat_max)
+
+    # =========================================================
+    # PRECIPITATION MAPS
+    # KEEPING EXISTING LOGIC AS-IS
+    # =========================================================
+    map_data = region_df.dropna(
+        subset=["total_precipitation", "latitude", "longitude"]
+    ).copy()
+
+    if map_data.empty:
+        print("⚠️ No strict monthly data for region:", reg["key"], "-> skipping precipitation map")
+    else:
+        top_n = int(reg.get("top_n", TOP_N))
+        top_text = build_top_text(region_df, top_n)
+
+        grid_x, grid_y = np.meshgrid(
+            np.linspace(lon_min, lon_max, GRID_N),
+            np.linspace(lat_min, lat_max, GRID_N)
+        )
+
+        lats = map_data["latitude"].to_numpy(dtype=float)
+        lons = map_data["longitude"].to_numpy(dtype=float)
+        values = map_data["total_precipitation"].to_numpy(dtype=float)
+
+        grid_intensity = idw_optimized(lons, lats, values, grid_x, grid_y)
+
+        grid_points = gpd.GeoDataFrame(
+            geometry=gpd.points_from_xy(grid_x.ravel(), grid_y.ravel()),
+            crs="EPSG:4326"
+        )
+        mask_bool = grid_points.geometry.within(greece_union).to_numpy()
+        mask_2d = mask_bool.reshape(grid_x.shape)
+
+        masked_intensity = np.full(grid_x.shape, np.nan)
+        masked_intensity[mask_2d] = grid_intensity[mask_2d]
+
+        fig, ax = plt.subplots(figsize=(PLOT_WIDTH, PLOT_HEIGHT))
+
+        img = ax.imshow(
+            masked_intensity,
+            extent=(lon_min, lon_max, lat_min, lat_max),
+            origin="lower",
+            cmap=cmap,
+            norm=norm,
+            alpha=0.7
+        )
+
+        greece_clip = greece.cx[lon_min:lon_max, lat_min:lat_max]
+        if not greece_clip.empty:
+            greece_clip.boundary.plot(ax=ax, color="black", linewidth=0.5)
+
+        ax.set_xlim(lon_min, lon_max)
+        ax.set_ylim(lat_min, lat_max)
+
+        ax.contour(
+            grid_x, grid_y, masked_intensity,
+            levels=contour_levels, colors="black", linewidths=0.5
+        )
+
+        cbar = plt.colorbar(img, ax=ax, orientation="vertical", boundaries=bounds)
+        cbar.set_ticks([0, 0.1, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300])
+        cbar.set_label("Σωρευτικός υετός μήνα (mm)", fontsize=12)
+
+        ax.set_title(reg["title"], fontsize=16)
+        ax.set_xlabel("Γεωγραφικό μήκος", fontsize=12)
+        ax.set_ylabel("Γεωγραφικό πλάτος", fontsize=12)
+
+        ts = ax.text(
+            0.01, 0.01, timestamp_text, transform=ax.transAxes,
+            fontsize=10, color="black", ha="left", va="bottom",
+            bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.3")
+        )
+        ts.set_path_effects([pe.withStroke(linewidth=3.0, foreground="white")])
+
+        if top_text.strip():
+            top_loc = reg.get("top_loc", "top_right")
+
+            if top_loc == "bottom_right":
+                x, y = 0.99, 0.01
+                ha, va = "right", "bottom"
+            else:
+                x, y = 0.99, 0.99
+                ha, va = "right", "top"
+
+            top_block = f"Υψηλότερα ποσά (Top {top_n}):\n─────────────────────\n" + top_text
+
+            txt = ax.text(
+                x, y, top_block, transform=ax.transAxes,
+                fontsize=TOP_FONTSIZE, color="black", ha=ha, va=va,
+                bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.22")
+            )
+            txt.set_path_effects([pe.withStroke(linewidth=2.2, foreground="white")])
+
+        buffer_main = io.BytesIO()
+        fig.savefig(buffer_main, format="png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+        upload_to_ftp(buffer_main, reg["outfile"])
+        print("✅ Region monthly precipitation map uploaded:", reg["outfile"])
+
+    # =========================================================
+    # MONTHLY AVERAGE TEMPERATURE MAPS
+    # NEW ADDITION
+    # =========================================================
+    if reg.get("temp_mode") == "egsa":
+        plot_monthly_tavg_region_egsa(region_df, reg, greece, athens_now)
+    else:
+        plot_monthly_tavg_greece_wgs(region_df, reg, greece, athens_now)
+
+print("✅ Done (current month precipitation + monthly average temperature, all regions processed).")
