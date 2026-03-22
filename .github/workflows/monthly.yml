@@ -3,12 +3,28 @@ name: Monthly maps
 on:
   workflow_dispatch:
 
+concurrency:
+  group: monthly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   generate-monthly-maps:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      MPLBACKEND: Agg
+      CURRENTMONTHURL: ${{ secrets.CURRENTMONTHURL }}
+      FTP_HOST: ${{ secrets.FTP_HOST }}
+      FTP_USER: ${{ secrets.FTP_USER }}
+      FTP_PASS: ${{ secrets.FTP_PASS }}
+      GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
 
     steps:
-      - name: Check out repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -16,16 +32,25 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install numpy pandas scipy geopandas matplotlib requests pyogrio shapely fiona
+          pip install --only-binary=:all: \
+            numpy pandas matplotlib scipy requests \
+            shapely pyproj fiona geopandas pyogrio
 
-      - name: Generate current month maps
-        env:
-          CURRENTMONTHURL: ${{ secrets.CURRENTMONTHURL }}
-          GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
-          FTP_HOST: ${{ secrets.FTP_HOST }}
-          FTP_USER: ${{ secrets.FTP_USER }}
-          FTP_PASS: ${{ secrets.FTP_PASS }}
-        run: python monthly.py
+      - name: Decrypt greece.geojson if needed
+        if: ${{ hashFiles('greece.geojson') == '' }}
+        run: |
+          test -f greece.geojson.enc || { echo "greece.geojson.enc missing"; exit 1; }
+          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in greece.geojson.enc \
+            -out greece.geojson \
+            -pass pass:"${GEOJSON_PASS}"
+          ls -l greece.geojson
+
+      - name: Run monthly.py
+        run: |
+          python -V
+          python monthly.py
