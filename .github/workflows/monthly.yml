@@ -36,7 +36,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-monthly-${{ hashFiles('**/requirements.txt') }}
+          key: ${{ runner.os }}-pip-monthly-${{ hashFiles('.github/workflows/monthly.yml', 'monthly.py') }}
           restore-keys: |
             ${{ runner.os }}-pip-monthly-
 
@@ -45,7 +45,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install --only-binary=:all: \
             numpy pandas matplotlib scipy requests \
-            shapely pyproj fiona geopandas pyogrio
+            shapely pyproj fiona geopandas pyogrio rasterio
 
       - name: Decrypt greece.geojson if needed
         if: ${{ hashFiles('greece.geojson') == '' }}
