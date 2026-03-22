@@ -62,12 +62,13 @@ CRS_EGSA87 = "EPSG:2100"
 WGS_TO_EGSA = Transformer.from_crs(CRS_WGS84, CRS_EGSA87, always_xy=True)
 EGSA_TO_WGS = Transformer.from_crs(CRS_EGSA87, CRS_WGS84, always_xy=True)
 
-# Regional temperature interpolation settings in meters
+# Regional interpolation settings in meters
 REG_IDW_K = 8
 REG_IDW_POWER = 2
 REG_MAX_DISTANCE_M = 120_000
 REG_MIN_NEIGHBORS = 3
 REG_DISTANCE_MASK_M = 170_000
+REG_STATION_BUFFER_M = 200_000
 
 # Yearly mean temperature lapse-rate settings
 LAPSE_DEFAULT = -0.0065
@@ -385,13 +386,57 @@ def build_geo_mask_wgs(grid_x, grid_y, greece_gdf_wgs):
         geometry=gpd.points_from_xy(grid_x.ravel(), grid_y.ravel()),
         crs=greece_gdf_wgs.crs
     )
-    return pts.geometry.within(boundary).values.reshape(grid_x.shape)
+    geom = pts.geometry
+    mask = (geom.within(boundary) | geom.touches(boundary)).values
+    return mask.reshape(grid_x.shape)
+
+
+def build_geo_mask_egsa(grid_x_m, grid_y_m, greece_gdf_egsa, x_min, x_max, y_min, y_max):
+    greece_clip = greece_gdf_egsa.cx[x_min:x_max, y_min:y_max].copy()
+    if greece_clip.empty:
+        return np.zeros(grid_x_m.shape, dtype=bool), greece_clip
+
+    if hasattr(greece_clip.geometry, "union_all"):
+        boundary = greece_clip.geometry.union_all()
+    else:
+        boundary = greece_clip.unary_union
+
+    pts = gpd.GeoDataFrame(
+        geometry=gpd.points_from_xy(grid_x_m.ravel(), grid_y_m.ravel()),
+        crs=CRS_EGSA87
+    )
+    geom = pts.geometry
+    mask = (geom.within(boundary) | geom.touches(boundary)).values.reshape(grid_x_m.shape)
+    return mask, greece_clip
 
 
 def build_distance_mask(xgrid, ygrid, xs, ys, max_dist):
     tree = cKDTree(np.c_[xs, ys])
     d, _ = tree.query(np.c_[xgrid.ravel(), ygrid.ravel()])
     return (d.reshape(xgrid.shape) <= max_dist)
+
+
+def projected_bbox_from_wgs_bbox(lon_min, lon_max, lat_min, lat_max, n=200):
+    top_lons = np.linspace(lon_min, lon_max, n)
+    top_lats = np.full(n, lat_max)
+
+    bottom_lons = np.linspace(lon_min, lon_max, n)
+    bottom_lats = np.full(n, lat_min)
+
+    left_lons = np.full(n, lon_min)
+    left_lats = np.linspace(lat_min, lat_max, n)
+
+    right_lons = np.full(n, lon_max)
+    right_lats = np.linspace(lat_min, lat_max, n)
+
+    all_lons = np.concatenate([top_lons, bottom_lons, left_lons, right_lons])
+    all_lats = np.concatenate([top_lats, bottom_lats, left_lats, right_lats])
+
+    xs, ys = WGS_TO_EGSA.transform(all_lons.tolist(), all_lats.tolist())
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+
+    return float(np.min(xs)), float(np.max(xs)), float(np.min(ys)), float(np.max(ys))
 
 
 def estimate_local_lapse_rates_wgs(st_lons, st_lats, st_temp, st_elev,
@@ -632,7 +677,7 @@ for col in [
     if col in raw_data.columns:
         raw_data[col] = pd.to_numeric(raw_data[col], errors="coerce")
 
-# -------- Existing yearly/calendar filter logic (UNCHANGED) --------
+# -------- Existing yearly/calendar filter logic --------
 excluded_exact_year = {
     "agrivate_stavroupoli", "age_dasosxiromerou",
     "agrivate_rizia", "age_agiosilias",
@@ -655,7 +700,7 @@ else:
 
 data_year = data_year.dropna(subset=["latitude", "longitude"]).copy()
 
-# -------- Hydro filter logic (as in standalone hydro script) --------
+# -------- Hydro filter logic --------
 excluded_exact_hydro = {
     "agrivate_stavroupoli", "age_dasosxiromerou",
     "agrivate_rizia", "age_agiosilias", "metaxochori",
@@ -699,6 +744,8 @@ else:
     except Exception:
         pass
 
+greece_egsa = greece.to_crs(CRS_EGSA87)
+
 if hasattr(greece.geometry, "union_all"):
     greece_union = greece.geometry.union_all()
 else:
@@ -731,7 +778,7 @@ PPN_CONTOUR_LEVELS = [120, 240, 360, 480, 600, 720, 840, 960, 1080, 1200, 1500]
 # ======================
 # MAP BUILDERS
 # ======================
-def build_precip_map_buffer(
+def build_precip_map_buffer_wgs(
     region_df,
     reg,
     timestamp_text,
@@ -767,13 +814,7 @@ def build_precip_map_buffer(
 
     grid_intensity = idw_optimized(lons, lats, values, grid_x, grid_y)
 
-    grid_points = gpd.GeoDataFrame(
-        geometry=gpd.points_from_xy(grid_x.ravel(), grid_y.ravel()),
-        crs="EPSG:4326"
-    )
-    mask_bool = grid_points.geometry.within(greece_union).to_numpy()
-    mask_2d = mask_bool.reshape(grid_x.shape)
-
+    mask_2d = build_geo_mask_wgs(grid_x, grid_y, greece)
     masked_intensity = np.full(grid_x.shape, np.nan)
     masked_intensity[mask_2d] = grid_intensity[mask_2d]
 
@@ -818,6 +859,170 @@ def build_precip_map_buffer(
     if top_text.strip():
         top_loc = reg.get("top_loc", "top_right")
 
+        if top_loc == "bottom_right":
+            x, y = 0.99, 0.01
+            ha, va = "right", "bottom"
+        else:
+            x, y = 0.99, 0.99
+            ha, va = "right", "top"
+
+        top_block = f"Υψηλότερα ποσά (Top {top_n}):\n─────────────────────\n" + top_text
+
+        txt = ax.text(
+            x, y, top_block, transform=ax.transAxes,
+            fontsize=TOP_FONTSIZE, color="black", ha=ha, va=va,
+            bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.22")
+        )
+        txt.set_path_effects([pe.withStroke(linewidth=2.2, foreground="white")])
+
+    buffer_main = io.BytesIO()
+    fig.savefig(buffer_main, format="png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    buffer_main.seek(0)
+    return buffer_main
+
+
+def build_precip_region_egsa_buffer(
+    region_df,
+    reg,
+    timestamp_text,
+    strict_value_col,
+    top_value_col,
+    title_text,
+    cbar_label
+):
+    lon_min = reg["lon_min"]
+    lon_max = reg["lon_max"]
+    lat_min = reg["lat_min"]
+    lat_max = reg["lat_max"]
+
+    map_data = region_df.dropna(
+        subset=[strict_value_col, "latitude", "longitude"]
+    ).copy()
+
+    if map_data.empty:
+        print("⚠️ No precipitation data for region:", reg["key"], "column:", strict_value_col, "-> skipping map")
+        return None
+
+    top_n = int(reg.get("top_n", TOP_N))
+    top_text = build_top_text(region_df, top_n, top_value_col)
+
+    x_min, x_max, y_min, y_max = projected_bbox_from_wgs_bbox(
+        lon_min, lon_max, lat_min, lat_max, n=200
+    )
+
+    st_lon = map_data["longitude"].to_numpy(dtype=float)
+    st_lat = map_data["latitude"].to_numpy(dtype=float)
+    st_val = map_data[strict_value_col].to_numpy(dtype=float)
+
+    st_x, st_y = WGS_TO_EGSA.transform(st_lon.tolist(), st_lat.tolist())
+    st_x = np.asarray(st_x, dtype=float)
+    st_y = np.asarray(st_y, dtype=float)
+
+    near = (
+        (st_x >= (x_min - REG_STATION_BUFFER_M)) & (st_x <= (x_max + REG_STATION_BUFFER_M))
+        & (st_y >= (y_min - REG_STATION_BUFFER_M)) & (st_y <= (y_max + REG_STATION_BUFFER_M))
+    )
+
+    st_x = st_x[near]
+    st_y = st_y[near]
+    st_val = st_val[near]
+
+    if len(st_val) < REG_MIN_NEIGHBORS:
+        print("⚠️ Too few nearby precipitation stations for region:", reg["key"])
+        return None
+
+    grid_x_m, grid_y_m = np.meshgrid(
+        np.linspace(x_min, x_max, GRID_N),
+        np.linspace(y_min, y_max, GRID_N)
+    )
+
+    grid_val = idw_fast(
+        st_x, st_y, st_val,
+        grid_x_m, grid_y_m,
+        k=REG_IDW_K,
+        power=REG_IDW_POWER,
+        max_distance=REG_MAX_DISTANCE_M,
+        min_neighbors=REG_MIN_NEIGHBORS
+    )
+
+    geo_mask, greece_clip = build_geo_mask_egsa(
+        grid_x_m, grid_y_m, greece_egsa, x_min, x_max, y_min, y_max
+    )
+    if greece_clip.empty:
+        print("⚠️ Empty clipped geometry for region:", reg["key"])
+        return None
+
+    dist_mask = build_distance_mask(
+        grid_x_m, grid_y_m, st_x, st_y, max_dist=REG_DISTANCE_MASK_M
+    )
+
+    final_mask = geo_mask & dist_mask
+
+    out = np.full(grid_x_m.shape, np.nan, dtype=float)
+    out[final_mask] = grid_val[final_mask]
+
+    fig, ax = plt.subplots(figsize=(10, 10), dpi=300)
+
+    img = ax.imshow(
+        np.ma.masked_invalid(out),
+        extent=(x_min, x_max, y_min, y_max),
+        origin="lower",
+        cmap=PPN_CMAP,
+        norm=PPN_NORM,
+        alpha=0.85
+    )
+
+    greece_clip.boundary.plot(ax=ax, color="black", linewidth=0.6)
+
+    try:
+        ax.contour(
+            grid_x_m, grid_y_m, out,
+            levels=PPN_CONTOUR_LEVELS,
+            colors="black",
+            linewidths=0.5
+        )
+    except Exception:
+        pass
+
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_aspect("equal", adjustable="box")
+
+    y_ref_for_lon = y_min
+    x_ref_for_lat = x_min
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+
+    def fmt_lon(x, pos):
+        lon, _lat = EGSA_TO_WGS.transform(x, y_ref_for_lon)
+        return f"{lon:.2f}"
+
+    def fmt_lat(y, pos):
+        _lon, lat = EGSA_TO_WGS.transform(x_ref_for_lat, y)
+        return f"{lat:.2f}"
+
+    ax.xaxis.set_major_formatter(FuncFormatter(fmt_lon))
+    ax.yaxis.set_major_formatter(FuncFormatter(fmt_lat))
+
+    ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
+    ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
+    ax.set_title(title_text, fontsize=16, pad=10)
+
+    cbar = fig.colorbar(img, ax=ax, orientation="vertical", boundaries=PPN_BOUNDS, fraction=0.035, pad=0.02)
+    cbar.set_ticks([0, 120, 240, 360, 480, 600, 720, 840, 960, 1080, 1200, 1500])
+    cbar.set_label(cbar_label, fontsize=12)
+
+    ts = ax.text(
+        0.01, 0.01, timestamp_text,
+        transform=ax.transAxes, fontsize=9, color="black",
+        ha="left", va="bottom",
+        bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.3")
+    )
+    ts.set_path_effects([pe.withStroke(linewidth=2.0, foreground="white")])
+
+    if top_text.strip():
+        top_loc = reg.get("top_loc", "top_right")
         if top_loc == "bottom_right":
             x, y = 0.99, 0.01
             ha, va = "right", "bottom"
@@ -990,11 +1195,9 @@ def build_yearly_tavg_region_egsa_buffer(region_df, reg, greece_gdf_wgs, athens_
     lat_min = reg["lat_min"]
     lat_max = reg["lat_max"]
 
-    corners_lon = [lon_min, lon_min, lon_max, lon_max]
-    corners_lat = [lat_min, lat_max, lat_min, lat_max]
-    cx, cy = WGS_TO_EGSA.transform(corners_lon, corners_lat)
-    x_min, x_max = float(np.min(cx)), float(np.max(cx))
-    y_min, y_max = float(np.min(cy)), float(np.max(cy))
+    x_min, x_max, y_min, y_max = projected_bbox_from_wgs_bbox(
+        lon_min, lon_max, lat_min, lat_max, n=200
+    )
 
     st_lon = tt["longitude"].to_numpy(dtype=float)
     st_lat = tt["latitude"].to_numpy(dtype=float)
@@ -1004,10 +1207,9 @@ def build_yearly_tavg_region_egsa_buffer(region_df, reg, greece_gdf_wgs, athens_
     st_x = np.asarray(st_x, dtype=float)
     st_y = np.asarray(st_y, dtype=float)
 
-    buf = 200_000.0
     near = (
-        (st_x >= (x_min - buf)) & (st_x <= (x_max + buf))
-        & (st_y >= (y_min - buf)) & (st_y <= (y_max + buf))
+        (st_x >= (x_min - REG_STATION_BUFFER_M)) & (st_x <= (x_max + REG_STATION_BUFFER_M))
+        & (st_y >= (y_min - REG_STATION_BUFFER_M)) & (st_y <= (y_max + REG_STATION_BUFFER_M))
     )
 
     st_lon = st_lon[near]
@@ -1061,23 +1263,16 @@ def build_yearly_tavg_region_egsa_buffer(region_df, reg, greece_gdf_wgs, athens_
 
     t_grid = t0_grid + (lapse_grid * grid_elev)
 
-    greece_egsa = greece_gdf_wgs.to_crs(CRS_EGSA87)
-    greece_clip = greece_egsa.cx[x_min:x_max, y_min:y_max].copy()
-
-    if hasattr(greece_clip.geometry, "union_all"):
-        boundary = greece_clip.geometry.union_all()
-    else:
-        boundary = greece_clip.geometry.unary_union
-
-    grid_pts = gpd.GeoDataFrame(
-        geometry=gpd.points_from_xy(grid_x_m.ravel(), grid_y_m.ravel()),
-        crs=CRS_EGSA87
+    geo_mask, greece_clip = build_geo_mask_egsa(
+        grid_x_m, grid_y_m, greece_egsa, x_min, x_max, y_min, y_max
     )
-    geo_mask = grid_pts.geometry.within(boundary).values.reshape(grid_x_m.shape)
+    if greece_clip.empty:
+        print("⚠️ Empty clipped geometry for region:", reg["key"])
+        return None
 
-    tree = cKDTree(np.c_[st_x, st_y])
-    d, _ = tree.query(np.c_[grid_x_m.ravel(), grid_y_m.ravel()])
-    dist_mask = (d.reshape(grid_x_m.shape) <= REG_DISTANCE_MASK_M)
+    dist_mask = build_distance_mask(
+        grid_x_m, grid_y_m, st_x, st_y, max_dist=REG_DISTANCE_MASK_M
+    )
 
     final_mask = geo_mask & dist_mask & np.isfinite(grid_elev)
 
@@ -1095,8 +1290,7 @@ def build_yearly_tavg_region_egsa_buffer(region_df, reg, greece_gdf_wgs, athens_
         alpha=0.95
     )
 
-    if not greece_clip.empty:
-        greece_clip.boundary.plot(ax=ax, color="black", linewidth=0.6)
+    greece_clip.boundary.plot(ax=ax, color="black", linewidth=0.6)
 
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
@@ -1191,11 +1385,11 @@ def main():
     outputs = []
 
     # -------------------------------------------------
-    # 1) Existing national calendar-year precipitation
+    # 1) National calendar-year precipitation (WGS84)
     # -------------------------------------------------
     reg = REGIONS[0]
     region_df_year = bbox_filter(data_year, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
-    buf = build_precip_map_buffer(
+    buf = build_precip_map_buffer_wgs(
         region_df=region_df_year,
         reg=reg,
         timestamp_text=timestamp_text,
@@ -1208,18 +1402,18 @@ def main():
         outputs.append(("precip", reg["outfile"], buf))
 
     # -------------------------------------------------
-    # 2) Existing national yearly mean temperature
+    # 2) National yearly mean temperature (WGS84)
     # -------------------------------------------------
     buf = build_yearly_tavg_greece_buffer(region_df_year, reg, greece, athens_now, timestamp_text)
     if buf is not None:
         outputs.append(("temp", reg["temp_outfile"], buf))
 
     # -------------------------------------------------
-    # 3) Existing regional calendar-year precipitation
+    # 3) Regional calendar-year precipitation (EGSA87)
     # -------------------------------------------------
     for reg in REGIONS[1:]:
         region_df_year = bbox_filter(data_year, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
-        buf = build_precip_map_buffer(
+        buf = build_precip_region_egsa_buffer(
             region_df=region_df_year,
             reg=reg,
             timestamp_text=timestamp_text,
@@ -1232,7 +1426,7 @@ def main():
             outputs.append(("precip", reg["outfile"], buf))
 
     # -------------------------------------------------
-    # 4) Existing regional yearly mean temperature
+    # 4) Regional yearly mean temperature (EGSA87)
     # -------------------------------------------------
     for reg in REGIONS[1:]:
         region_df_year = bbox_filter(data_year, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
@@ -1241,11 +1435,11 @@ def main():
             outputs.append(("temp", reg["temp_outfile"], buf))
 
     # -------------------------------------------------
-    # 5) NEW national hydrological-year precipitation
+    # 5) National hydrological-year precipitation (WGS84)
     # -------------------------------------------------
     reg = REGIONS[0]
     region_df_hydro = bbox_filter(data_hydro, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
-    buf = build_precip_map_buffer(
+    buf = build_precip_map_buffer_wgs(
         region_df=region_df_hydro,
         reg=reg,
         timestamp_text=timestamp_text,
@@ -1258,11 +1452,11 @@ def main():
         outputs.append(("hydro_precip", reg["hydro_outfile"], buf))
 
     # -------------------------------------------------
-    # 6) NEW regional hydrological-year precipitation
+    # 6) Regional hydrological-year precipitation (EGSA87)
     # -------------------------------------------------
     for reg in REGIONS[1:]:
         region_df_hydro = bbox_filter(data_hydro, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
-        buf = build_precip_map_buffer(
+        buf = build_precip_region_egsa_buffer(
             region_df=region_df_hydro,
             reg=reg,
             timestamp_text=timestamp_text,
