@@ -10,6 +10,8 @@ from io import StringIO
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from ftplib import FTP_TLS
+import time
+import socket
 
 import numpy as np
 import pandas as pd
@@ -630,12 +632,32 @@ TEMP_CMAP, TEMP_NORM = build_shared_temp_cmap_norm()
 # ======================
 # FTP SESSION HELPERS
 # ======================
-def ftp_connect():
-    ftps = FTP_TLS()
-    ftps.connect(FTP_HOST, 21, timeout=60)
-    ftps.login(user=FTP_USER, passwd=FTP_PASS)
-    ftps.prot_p()
-    return ftps
+def ftp_connect(max_attempts=4, sleep_seconds=15):
+    last_exc = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            print("🔌 FTPS connect attempt {}/{} to host: {}".format(attempt, max_attempts, FTP_HOST))
+            ftps = FTP_TLS()
+            ftps.connect(FTP_HOST, 21, timeout=60)
+            ftps.login(user=FTP_USER, passwd=FTP_PASS)
+            ftps.prot_p()
+            print("✅ FTPS connection established.")
+            return ftps
+
+        except socket.gaierror as e:
+            last_exc = e
+            print("⚠️ DNS resolution failed for FTP host on attempt {}: {}".format(attempt, e))
+
+        except Exception as e:
+            last_exc = e
+            print("⚠️ FTPS connection/login failed on attempt {}: {}".format(attempt, e))
+
+        if attempt < max_attempts:
+            print("⏳ Waiting {}s before retry...".format(sleep_seconds))
+            time.sleep(sleep_seconds)
+
+    raise RuntimeError("FTPS connection failed after {} attempts: {}".format(max_attempts, last_exc))
 
 
 def upload_via_session(ftps, file_buffer, filename):
