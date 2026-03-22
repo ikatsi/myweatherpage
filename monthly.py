@@ -62,22 +62,12 @@ CRS_EGSA87 = "EPSG:2100"
 WGS_TO_EGSA = Transformer.from_crs(CRS_WGS84, CRS_EGSA87, always_xy=True)
 EGSA_TO_WGS = Transformer.from_crs(CRS_EGSA87, CRS_WGS84, always_xy=True)
 
-# Regional temperature interpolation settings in meters
 REG_IDW_K = 8
 REG_IDW_POWER = 2
 REG_MAX_DISTANCE_M = 120_000
 REG_MIN_NEIGHBORS = 3
 REG_DISTANCE_MASK_M = 170_000
 
-# Monthly mean temperature lapse-rate settings
-# Rationale:
-# For monthly mean temperature, altitude still matters strongly,
-# but the field should be smoother and less "weather-noisy" than TNow.
-# Therefore we keep lapse-rate correction, but do NOT use:
-# - cold-pool logic
-# - wind/RH adjustments
-# - min/max neighbor envelopes
-# This gives a terrain-adjusted monthly mean field, not a snapshot field.
 LAPSE_DEFAULT = -0.0065
 LAPSE_MIN = -0.0100
 LAPSE_MAX = 0.0020
@@ -95,7 +85,6 @@ if not GEOJSON_PASS:
 if not FTP_HOST or not FTP_USER or not FTP_PASS:
     raise RuntimeError("FTP_HOST / FTP_USER / FTP_PASS environment variables are not all set.")
 
-# EXACT BOXES: same as yearly scripts
 REGIONS = [
     {
         "key": "greece",
@@ -222,7 +211,9 @@ def idw_optimized(x, y, z, xi, yi, power=2, k=8):
     with np.errstate(divide="ignore", invalid="ignore"):
         weights = 1.0 / (dist ** power)
         weights[dist == 0] = 1e12
-        zi = np.sum(weights * z[idx], axis=1) / np.sum(weights, axis=1)
+        denom = np.sum(weights, axis=1)
+        num = np.sum(weights * z[idx], axis=1)
+        zi = np.divide(num, denom, out=np.full_like(num, np.nan, dtype=float), where=denom > 0)
 
     return zi.reshape(xi.shape)
 
@@ -265,7 +256,7 @@ def idw_fast(x, y, z, xi, yi, k=8, power=2, max_distance=1.0, min_neighbors=3):
     num = np.sum(w * z_nei, axis=1)
     den = np.sum(w, axis=1)
 
-    zi_ok = np.where(den > 0, num / den, np.nan)
+    zi_ok = np.divide(num, den, out=np.full_like(num, np.nan, dtype=float), where=den > 0)
     zi[ok_pts] = zi_ok[ok_pts]
     return zi.reshape(xi.shape)
 
@@ -313,20 +304,6 @@ def build_temp_top_text(region_df, top_n):
             lines.append(f"{name} {tv}°C")
 
     return "\n".join(lines)
-
-
-def upload_to_ftp(file_buffer, filename):
-    try:
-        ftps = FTP_TLS()
-        ftps.connect(FTP_HOST, 21)
-        ftps.login(user=FTP_USER, passwd=FTP_PASS)
-        ftps.prot_p()
-        file_buffer.seek(0)
-        ftps.storbinary("STOR {}".format(filename), file_buffer)
-        ftps.quit()
-        print("📤 Uploaded: {}".format(filename))
-    except Exception as e:
-        print("⚠️ FTP upload failed for {}: {}".format(filename, e))
 
 
 def ensure_altitude_bundle():
@@ -556,7 +533,6 @@ def add_temp_contours(ax, X, Y, field):
 
 # ======================
 # SHARED TEMP PALETTE
-# SAME AS TNOW
 # ======================
 TEMP_VMIN = -25.0
 TEMP_VMAX = 45.0
@@ -593,6 +569,28 @@ TEMP_CMAP, TEMP_NORM = build_shared_temp_cmap_norm()
 
 
 # ======================
+# FTP SESSION HELPERS
+# ======================
+def ftp_connect():
+    ftps = FTP_TLS()
+    ftps.connect(FTP_HOST, 21, timeout=60)
+    ftps.login(user=FTP_USER, passwd=FTP_PASS)
+    ftps.prot_p()
+    return ftps
+
+
+def upload_via_session(ftps, file_buffer, filename):
+    try:
+        file_buffer.seek(0)
+        ftps.storbinary("STOR {}".format(filename), file_buffer)
+        print("📤 Uploaded: {}".format(filename))
+        return True
+    except Exception as e:
+        print("⚠️ FTP upload failed for {}: {}".format(filename, e))
+        return False
+
+
+# ======================
 # LOAD DATA
 # ======================
 response = requests.get(TXT_URL, headers=HEADERS, timeout=TIMEOUT)
@@ -603,7 +601,6 @@ data = pd.read_csv(StringIO(response.text), delimiter="\t")
 athens_now = datetime.now(ZoneInfo("Europe/Athens"))
 today_day = athens_now.day
 
-# Normalize webcode for robust filtering
 w = data["webcode"].astype("string").str.strip().str.casefold()
 
 excluded_exact = {
@@ -624,7 +621,6 @@ data = data[
     & (~w.str.startswith(excluded_prefixes, na=False))
 ].copy()
 
-# Numeric columns
 data["latitude"] = pd.to_numeric(data["latitude"], errors="coerce")
 data["longitude"] = pd.to_numeric(data["longitude"], errors="coerce")
 data["total_precipitation"] = pd.to_numeric(data["total_precipitation"], errors="coerce")
@@ -641,7 +637,6 @@ if "avg_tavg" in data.columns:
 else:
     data["avg_tavg"] = np.nan
 
-# Remove missing coordinates
 data = data.dropna(subset=["latitude", "longitude"]).copy()
 
 if data.empty:
@@ -695,25 +690,119 @@ contour_levels = [0.2, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300]
 
 
 # ======================
-# TEMPERATURE RENDERERS
+# MAP BUILDERS
 # ======================
-def plot_monthly_tavg_greece_wgs(region_df, reg, greece_gdf_wgs, athens_now):
-    """
-    Monthly mean temperature rationale:
-    - use direct station monthly mean temperature (avg_tavg), not derived from extremes
-    - de-altitude each station to a sea-level equivalent monthly mean
-    - interpolate sea-level field + local lapse-rate field
-    - restore altitude with DEM
-    - do not use instantaneous logic (cold pools, wind/RH gating, envelope fields)
-    """
+def build_precip_map_buffer(region_df, reg, timestamp_text):
+    lon_min = reg["lon_min"]
+    lon_max = reg["lon_max"]
+    lat_min = reg["lat_min"]
+    lat_max = reg["lat_max"]
+
+    map_data = region_df.dropna(
+        subset=["total_precipitation", "latitude", "longitude"]
+    ).copy()
+
+    if map_data.empty:
+        print("⚠️ No strict monthly data for region:", reg["key"], "-> skipping precipitation map")
+        return None
+
+    top_n = int(reg.get("top_n", TOP_N))
+    top_text = build_top_text(region_df, top_n)
+
+    grid_x, grid_y = np.meshgrid(
+        np.linspace(lon_min, lon_max, GRID_N),
+        np.linspace(lat_min, lat_max, GRID_N)
+    )
+
+    lats = map_data["latitude"].to_numpy(dtype=float)
+    lons = map_data["longitude"].to_numpy(dtype=float)
+    values = map_data["total_precipitation"].to_numpy(dtype=float)
+
+    grid_intensity = idw_optimized(lons, lats, values, grid_x, grid_y)
+
+    grid_points = gpd.GeoDataFrame(
+        geometry=gpd.points_from_xy(grid_x.ravel(), grid_y.ravel()),
+        crs="EPSG:4326"
+    )
+    mask_bool = grid_points.geometry.within(greece_union).to_numpy()
+    mask_2d = mask_bool.reshape(grid_x.shape)
+
+    masked_intensity = np.full(grid_x.shape, np.nan)
+    masked_intensity[mask_2d] = grid_intensity[mask_2d]
+
+    fig, ax = plt.subplots(figsize=(PLOT_WIDTH, PLOT_HEIGHT))
+
+    img = ax.imshow(
+        masked_intensity,
+        extent=(lon_min, lon_max, lat_min, lat_max),
+        origin="lower",
+        cmap=cmap,
+        norm=norm,
+        alpha=0.7
+    )
+
+    greece_clip = greece.cx[lon_min:lon_max, lat_min:lat_max]
+    if not greece_clip.empty:
+        greece_clip.boundary.plot(ax=ax, color="black", linewidth=0.5)
+
+    ax.set_xlim(lon_min, lon_max)
+    ax.set_ylim(lat_min, lat_max)
+
+    ax.contour(
+        grid_x, grid_y, masked_intensity,
+        levels=contour_levels, colors="black", linewidths=0.5
+    )
+
+    cbar = plt.colorbar(img, ax=ax, orientation="vertical", boundaries=bounds)
+    cbar.set_ticks([0, 0.1, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300])
+    cbar.set_label("Σωρευτικός υετός μήνα (mm)", fontsize=12)
+
+    ax.set_title(reg["title"], fontsize=16)
+    ax.set_xlabel("Γεωγραφικό μήκος", fontsize=12)
+    ax.set_ylabel("Γεωγραφικό πλάτος", fontsize=12)
+
+    ts = ax.text(
+        0.01, 0.01, timestamp_text, transform=ax.transAxes,
+        fontsize=10, color="black", ha="left", va="bottom",
+        bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.3")
+    )
+    ts.set_path_effects([pe.withStroke(linewidth=3.0, foreground="white")])
+
+    if top_text.strip():
+        top_loc = reg.get("top_loc", "top_right")
+
+        if top_loc == "bottom_right":
+            x, y = 0.99, 0.01
+            ha, va = "right", "bottom"
+        else:
+            x, y = 0.99, 0.99
+            ha, va = "right", "top"
+
+        top_block = f"Υψηλότερα ποσά (Top {top_n}):\n─────────────────────\n" + top_text
+
+        txt = ax.text(
+            x, y, top_block, transform=ax.transAxes,
+            fontsize=TOP_FONTSIZE, color="black", ha=ha, va=va,
+            bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.22")
+        )
+        txt.set_path_effects([pe.withStroke(linewidth=2.2, foreground="white")])
+
+    buffer_main = io.BytesIO()
+    fig.savefig(buffer_main, format="png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    buffer_main.seek(0)
+    return buffer_main
+
+
+def build_monthly_tavg_greece_buffer(region_df, reg, greece_gdf_wgs, athens_now, timestamp_text):
     if "avg_tavg" not in region_df.columns:
         print("⚠️ avg_tavg missing -> skipping:", reg["key"])
-        return
+        return None
 
     tt = region_df.dropna(subset=["avg_tavg", "latitude", "longitude"]).copy()
     if tt.empty:
         print("⚠️ No monthly avg_tavg data for region:", reg["key"])
-        return
+        return None
 
     lon_min = reg["lon_min"]
     lon_max = reg["lon_max"]
@@ -739,7 +828,7 @@ def plot_monthly_tavg_greece_wgs(region_df, reg, greece_gdf_wgs, athens_now):
 
     if len(st_t) < 5:
         print("⚠️ Too few stations for monthly avg_tavg in region:", reg["key"])
-        return
+        return None
 
     st_lapse = estimate_local_lapse_rates_wgs(st_lons, st_lats, st_t, st_elev)
     st_t0 = st_t - (st_lapse * st_elev)
@@ -790,9 +879,6 @@ def plot_monthly_tavg_greece_wgs(region_df, reg, greece_gdf_wgs, athens_now):
     ax.set_xlabel("Γεωγραφικό μήκος", fontsize=12)
     ax.set_ylabel("Γεωγραφικό πλάτος", fontsize=12)
 
-    timestamp = athens_now.strftime("%Y-%m-%d %H:%M %Z")
-    timestamp_text = "Δημιουργήθηκε για το e-kairos.gr\n" + timestamp
-
     ts = ax.text(
         0.01, 0.01, timestamp_text, transform=ax.transAxes,
         fontsize=10, color="black", ha="left", va="bottom",
@@ -838,20 +924,19 @@ def plot_monthly_tavg_greece_wgs(region_df, reg, greece_gdf_wgs, athens_now):
     buffer_main = io.BytesIO()
     fig.savefig(buffer_main, format="png", dpi=300, bbox_inches="tight")
     plt.close(fig)
+    buffer_main.seek(0)
+    return buffer_main
 
-    upload_to_ftp(buffer_main, reg["temp_outfile"])
-    print("✅ Region monthly tavg map uploaded:", reg["temp_outfile"])
 
-
-def plot_monthly_tavg_region_egsa(region_df, reg, greece_gdf_wgs, athens_now):
+def build_monthly_tavg_region_egsa_buffer(region_df, reg, greece_gdf_wgs, athens_now, timestamp_text):
     if "avg_tavg" not in region_df.columns:
         print("⚠️ avg_tavg missing -> skipping:", reg["key"])
-        return
+        return None
 
     tt = region_df.dropna(subset=["avg_tavg", "latitude", "longitude"]).copy()
     if tt.empty:
         print("⚠️ No monthly avg_tavg data for region:", reg["key"])
-        return
+        return None
 
     lon_min = reg["lon_min"]
     lon_max = reg["lon_max"]
@@ -886,7 +971,7 @@ def plot_monthly_tavg_region_egsa(region_df, reg, greece_gdf_wgs, athens_now):
 
     if len(st_t) < 8:
         print("⚠️ Too few nearby stations for monthly avg_tavg in region:", reg["key"])
-        return
+        return None
 
     st_elev = sample_dem_lonlat(DEM_PATH, st_lon, st_lat)
 
@@ -898,15 +983,8 @@ def plot_monthly_tavg_region_egsa(region_df, reg, greece_gdf_wgs, athens_now):
 
     if len(st_t) < 8:
         print("⚠️ Too few valid stations after DEM for region:", reg["key"])
-        return
+        return None
 
-    # Rationale:
-    # For monthly mean temperature we use the same terrain-aware core idea as TNow:
-    # 1) estimate station-level lapse rates from local station neighborhoods
-    # 2) convert each station monthly mean temperature to a sea-level equivalent (t0)
-    # 3) interpolate t0 and lapse in projected metric space
-    # 4) restore elevation effect with DEM on the grid
-    # This preserves orographic thermal structure without importing TNow-only transient logic.
     st_lapse = estimate_local_lapse_rates_egsa(st_x, st_y, st_t, st_elev)
     st_t0 = st_t - (st_lapse * st_elev)
 
@@ -1004,9 +1082,6 @@ def plot_monthly_tavg_region_egsa(region_df, reg, greece_gdf_wgs, athens_now):
 
     ax.set_title(reg["temp_title"], fontsize=16, pad=10)
 
-    timestamp = athens_now.strftime("%Y-%m-%d %H:%M %Z")
-    timestamp_text = "Δημιουργήθηκε για το e-kairos.gr\n" + timestamp
-
     ts = ax.text(
         0.01, 0.01, timestamp_text,
         transform=ax.transAxes, fontsize=9, color="black",
@@ -1053,134 +1128,80 @@ def plot_monthly_tavg_region_egsa(region_df, reg, greece_gdf_wgs, athens_now):
     buffer_main = io.BytesIO()
     fig.savefig(buffer_main, format="png", dpi=300, bbox_inches="tight")
     plt.close(fig)
-
-    upload_to_ftp(buffer_main, reg["temp_outfile"])
-    print("✅ Region monthly tavg map uploaded:", reg["temp_outfile"])
+    buffer_main.seek(0)
+    return buffer_main
 
 
 # ======================
-# RUN ALL REGIONS
+# MAIN
 # ======================
-timestamp = athens_now.strftime("%Y-%m-%d %H:%M %Z")
-timestamp_text = "Δημιουργήθηκε για το e-kairos.gr\n" + timestamp
+def main():
+    ensure_altitude_bundle()
 
-# DEM is needed only for the added temperature maps
-ensure_altitude_bundle()
+    timestamp = athens_now.strftime("%Y-%m-%d %H:%M %Z")
+    timestamp_text = "Δημιουργήθηκε για το e-kairos.gr\n" + timestamp
 
-for reg in REGIONS:
-    lon_min = reg["lon_min"]
-    lon_max = reg["lon_max"]
-    lat_min = reg["lat_min"]
-    lat_max = reg["lat_max"]
+    outputs = []
 
-    region_df = bbox_filter(data, lon_min, lon_max, lat_min, lat_max)
+    # 1) National precipitation
+    reg = REGIONS[0]
+    region_df = bbox_filter(data, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+    buf = build_precip_map_buffer(region_df, reg, timestamp_text)
+    if buf is not None:
+        outputs.append(("precip", reg["outfile"], buf))
 
-    # =========================================================
-    # PRECIPITATION MAPS
-    # KEEPING EXISTING LOGIC AS-IS
-    # =========================================================
-    map_data = region_df.dropna(
-        subset=["total_precipitation", "latitude", "longitude"]
-    ).copy()
+    # 2) National tavg
+    buf = build_monthly_tavg_greece_buffer(region_df, reg, greece, athens_now, timestamp_text)
+    if buf is not None:
+        outputs.append(("temp", reg["temp_outfile"], buf))
 
-    if map_data.empty:
-        print("⚠️ No strict monthly data for region:", reg["key"], "-> skipping precipitation map")
-    else:
-        top_n = int(reg.get("top_n", TOP_N))
-        top_text = build_top_text(region_df, top_n)
+    # 3) Regional precipitation
+    for reg in REGIONS[1:]:
+        region_df = bbox_filter(data, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+        buf = build_precip_map_buffer(region_df, reg, timestamp_text)
+        if buf is not None:
+            outputs.append(("precip", reg["outfile"], buf))
 
-        grid_x, grid_y = np.meshgrid(
-            np.linspace(lon_min, lon_max, GRID_N),
-            np.linspace(lat_min, lat_max, GRID_N)
-        )
+    # 4) Regional temperature
+    for reg in REGIONS[1:]:
+        region_df = bbox_filter(data, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+        buf = build_monthly_tavg_region_egsa_buffer(region_df, reg, greece, athens_now, timestamp_text)
+        if buf is not None:
+            outputs.append(("temp", reg["temp_outfile"], buf))
 
-        lats = map_data["latitude"].to_numpy(dtype=float)
-        lons = map_data["longitude"].to_numpy(dtype=float)
-        values = map_data["total_precipitation"].to_numpy(dtype=float)
+    if not outputs:
+        raise RuntimeError("No output maps were generated.")
 
-        grid_intensity = idw_optimized(lons, lats, values, grid_x, grid_y)
+    ftps = None
+    try:
+        ftps = ftp_connect()
+        print("✅ FTPS session opened once for all uploads.")
 
-        grid_points = gpd.GeoDataFrame(
-            geometry=gpd.points_from_xy(grid_x.ravel(), grid_y.ravel()),
-            crs="EPSG:4326"
-        )
-        mask_bool = grid_points.geometry.within(greece_union).to_numpy()
-        mask_2d = mask_bool.reshape(grid_x.shape)
-
-        masked_intensity = np.full(grid_x.shape, np.nan)
-        masked_intensity[mask_2d] = grid_intensity[mask_2d]
-
-        fig, ax = plt.subplots(figsize=(PLOT_WIDTH, PLOT_HEIGHT))
-
-        img = ax.imshow(
-            masked_intensity,
-            extent=(lon_min, lon_max, lat_min, lat_max),
-            origin="lower",
-            cmap=cmap,
-            norm=norm,
-            alpha=0.7
-        )
-
-        greece_clip = greece.cx[lon_min:lon_max, lat_min:lat_max]
-        if not greece_clip.empty:
-            greece_clip.boundary.plot(ax=ax, color="black", linewidth=0.5)
-
-        ax.set_xlim(lon_min, lon_max)
-        ax.set_ylim(lat_min, lat_max)
-
-        ax.contour(
-            grid_x, grid_y, masked_intensity,
-            levels=contour_levels, colors="black", linewidths=0.5
-        )
-
-        cbar = plt.colorbar(img, ax=ax, orientation="vertical", boundaries=bounds)
-        cbar.set_ticks([0, 0.1, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300])
-        cbar.set_label("Σωρευτικός υετός μήνα (mm)", fontsize=12)
-
-        ax.set_title(reg["title"], fontsize=16)
-        ax.set_xlabel("Γεωγραφικό μήκος", fontsize=12)
-        ax.set_ylabel("Γεωγραφικό πλάτος", fontsize=12)
-
-        ts = ax.text(
-            0.01, 0.01, timestamp_text, transform=ax.transAxes,
-            fontsize=10, color="black", ha="left", va="bottom",
-            bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.3")
-        )
-        ts.set_path_effects([pe.withStroke(linewidth=3.0, foreground="white")])
-
-        if top_text.strip():
-            top_loc = reg.get("top_loc", "top_right")
-
-            if top_loc == "bottom_right":
-                x, y = 0.99, 0.01
-                ha, va = "right", "bottom"
+        for kind, filename, file_buffer in outputs:
+            ok = upload_via_session(ftps, file_buffer, filename)
+            if ok:
+                if kind == "precip":
+                    print("✅ Region monthly precipitation map uploaded:", filename)
+                else:
+                    print("✅ Region monthly tavg map uploaded:", filename)
             else:
-                x, y = 0.99, 0.99
-                ha, va = "right", "top"
+                if kind == "precip":
+                    print("❌ Region monthly precipitation map NOT uploaded:", filename)
+                else:
+                    print("❌ Region monthly tavg map NOT uploaded:", filename)
 
-            top_block = f"Υψηλότερα ποσά (Top {top_n}):\n─────────────────────\n" + top_text
+    finally:
+        if ftps is not None:
+            try:
+                ftps.quit()
+            except Exception:
+                try:
+                    ftps.close()
+                except Exception:
+                    pass
 
-            txt = ax.text(
-                x, y, top_block, transform=ax.transAxes,
-                fontsize=TOP_FONTSIZE, color="black", ha=ha, va=va,
-                bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.22")
-            )
-            txt.set_path_effects([pe.withStroke(linewidth=2.2, foreground="white")])
+    print("✅ Done (current month precipitation + monthly average temperature, all regions processed).")
 
-        buffer_main = io.BytesIO()
-        fig.savefig(buffer_main, format="png", dpi=300, bbox_inches="tight")
-        plt.close(fig)
 
-        upload_to_ftp(buffer_main, reg["outfile"])
-        print("✅ Region monthly precipitation map uploaded:", reg["outfile"])
-
-    # =========================================================
-    # MONTHLY AVERAGE TEMPERATURE MAPS
-    # NEW ADDITION
-    # =========================================================
-    if reg.get("temp_mode") == "egsa":
-        plot_monthly_tavg_region_egsa(region_df, reg, greece, athens_now)
-    else:
-        plot_monthly_tavg_greece_wgs(region_df, reg, greece, athens_now)
-
-print("✅ Done (current month precipitation + monthly average temperature, all regions processed).")
+if __name__ == "__main__":
+    main()
