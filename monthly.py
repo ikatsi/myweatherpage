@@ -651,7 +651,7 @@ excluded_exact = {
     "agrivate_rizia", "age_agiosilias", "wu_lefkaditi", "wu_lampeia",
     "wu_karkalou", "hnms3_megara", "wu_varnavas", "wu_sykamino",
     "wu_avlonas", "age_galatas", "ierapetra", "agrivate_messouni",
-    "pws_proti2", "age_vrana", "potamoi"
+    "pws_proti2", "age_vrana", "potamoi", "age_leptokarya"
 }
 excluded_prefixes = ("hcmr_", "uoi_")
 
