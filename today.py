@@ -1,25 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# today.py  (GitHub-ready, no secrets)
+# today.py
 #
-# Produces and uploads (same outputs as before):
-#   1) todayrain.png  (TodayRain accumulated since midnight)
-#   2) tmin.png       (Altitude-aware Tmin map with spatially varying lapse rate)
-#   3) tmax.png       (Altitude-aware Tmax map with spatially varying lapse rate)
+# Produces national + regional maps for:
+#   1) TodayRain
+#   2) TMin
+#   3) TMax
 #
-# Requirements:
-#   pip install numpy pandas geopandas matplotlib scipy requests rasterio
+# Regions:
+#   - Attica
+#   - NE Greece
+#   - SW Greece
+#   - Crete
+#   - Greece (national)
 #
-# Secrets/config are provided via environment variables (GitHub Actions Secrets/Variables):
-#   CURRENTWEATHER_URL   -> URL to weathernow.txt (tab-separated)
-#   FTP_HOST
-#   FTP_USER
-#   FTP_PASS
-#   GEOJSON_PASS         -> passphrase to decrypt greece.geojson.enc and altitude.zip.enc
+# Stable national filenames stay unchanged:
+#   todayrain.png
+#   tmin.png
+#   tmax.png
 #
-# Encrypted assets expected in repo root:
-#   greece.geojson.enc   -> decrypts to greece.geojson
-#   altitude.zip.enc     -> decrypts to altitude.zip -> extracts DEM files incl. GRC_alt.vrt (and its sidecars)
+# Regional stable filenames follow the tnow.py rationale:
+#   todayrain_attica.png
+#   todayrain_negreece.png
+#   todayrain_swgreece.png
+#   todayrain_crete.png
+#   tmin_attica.png
+#   tmin_negreece.png
+#   tmin_swgreece.png
+#   tmin_crete.png
+#   tmax_attica.png
+#   tmax_negreece.png
+#   tmax_swgreece.png
+#   tmax_crete.png
+#
+# Uploads only the stable filenames to FTP.
 
 import os
 import re
@@ -43,34 +57,31 @@ matplotlib.rcParams["axes.unicode_minus"] = False
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm, LinearSegmentedColormap, Normalize
 import matplotlib.patheffects as pe
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 
 from scipy.spatial import cKDTree
 import requests
 from ftplib import FTP_TLS
 import rasterio
+from pyproj import Transformer
 
 
 # =========================
-# CONFIG (no secrets here)
+# CONFIG
 # =========================
-
 EXCLUDE_TMAX_WEBCODES = {"hua_ilion", "hua_argyroupoli", "age_leventochori", "age_vrana", "age_leptokarya"}
 EXCLUDE_PPN_WEBCODES = {"pws2_chalkida", "age_vrana", "potamoi", "age_leptokarya"}
 EXCLUDE_ALL_WEBCODES = {"pws_gebze"}
 
-
 BASE_DIR = os.path.abspath(os.path.dirname(__file__) or ".")
 
-# Public repo paths (decrypted/unzipped into repo root)
 GEOJSON_PATH = os.path.join(BASE_DIR, "greece.geojson")
 DEM_PATH = os.path.join(BASE_DIR, "GRC_alt.vrt")
 
-# Encrypted bundles (repo root)
 GEOJSON_ENC = os.path.join(BASE_DIR, "greece.geojson.enc")
 ALT_ENC = os.path.join(BASE_DIR, "altitude.zip.enc")
 ALT_ZIP = os.path.join(BASE_DIR, "altitude.zip")
 
-# Secrets injected via env
 DATA_URL = os.environ.get("CURRENTWEATHER_URL", "").strip()
 FTP_HOST = os.environ.get("FTP_HOST", "").strip()
 FTP_USER = os.environ.get("FTP_USER", "").strip()
@@ -78,9 +89,66 @@ FTP_PASS = os.environ.get("FTP_PASS", "").strip()
 GEOJSON_PASS = os.environ.get("GEOJSON_PASS", "").strip()
 BRAND_NAME = os.environ.get("BRAND_NAME", "").strip()
 
+# National grid
 GRID_LON_MIN, GRID_LON_MAX = 19.0, 30.0
 GRID_LAT_MIN, GRID_LAT_MAX = 34.5, 42.5
 GRID_N = 300
+
+# Regional bboxes from tnow.py
+AT_LON_MIN, AT_LON_MAX = 22.7, 25.0
+AT_LAT_MIN, AT_LAT_MAX = 37.5, 38.7
+AT_N = 300
+
+CR_LON_MIN, CR_LON_MAX = 23.37, 26.4
+CR_LAT_MIN, CR_LAT_MAX = 34.7, 35.78
+CR_N = 300
+
+NE_LON_MIN, NE_LON_MAX = 22.0, 26.6
+NE_LAT_MIN, NE_LAT_MAX = 39.7, 41.8
+NE_N = 300
+
+SW_LON_MIN, SW_LON_MAX = 20.0, 24.0
+SW_LAT_MIN, SW_LAT_MAX = 36.0, 39.0
+SW_N = 300
+
+REGIONS = [
+    {
+        "key": "attica",
+        "title_rain": "Σωρευτικός υετός ημέρας Αττικής",
+        "title_tmin": "Ελάχιστη θερμοκρασία Αττικής (προσαρμογή υψομέτρου)",
+        "title_tmax": "Μέγιστη θερμοκρασία Αττικής (προσαρμογή υψομέτρου)",
+        "lon_min": AT_LON_MIN, "lon_max": AT_LON_MAX,
+        "lat_min": AT_LAT_MIN, "lat_max": AT_LAT_MAX,
+        "n": AT_N,
+    },
+    {
+        "key": "negreece",
+        "title_rain": "Σωρευτικός υετός ημέρας ΒΑ Ελλάδας",
+        "title_tmin": "Ελάχιστη θερμοκρασία ΒΑ Ελλάδας (προσαρμογή υψομέτρου)",
+        "title_tmax": "Μέγιστη θερμοκρασία ΒΑ Ελλάδας (προσαρμογή υψομέτρου)",
+        "lon_min": NE_LON_MIN, "lon_max": NE_LON_MAX,
+        "lat_min": NE_LAT_MIN, "lat_max": NE_LAT_MAX,
+        "n": NE_N,
+    },
+    {
+        "key": "swgreece",
+        "title_rain": "Σωρευτικός υετός ημέρας ΝΔ Ελλάδας",
+        "title_tmin": "Ελάχιστη θερμοκρασία ΝΔ Ελλάδας (προσαρμογή υψομέτρου)",
+        "title_tmax": "Μέγιστη θερμοκρασία ΝΔ Ελλάδας (προσαρμογή υψομέτρου)",
+        "lon_min": SW_LON_MIN, "lon_max": SW_LON_MAX,
+        "lat_min": SW_LAT_MIN, "lat_max": SW_LAT_MAX,
+        "n": SW_N,
+    },
+    {
+        "key": "crete",
+        "title_rain": "Σωρευτικός υετός ημέρας Κρήτης",
+        "title_tmin": "Ελάχιστη θερμοκρασία Κρήτης (προσαρμογή υψομέτρου)",
+        "title_tmax": "Μέγιστη θερμοκρασία Κρήτης (προσαρμογή υψομέτρου)",
+        "lon_min": CR_LON_MIN, "lon_max": CR_LON_MAX,
+        "lat_min": CR_LAT_MIN, "lat_max": CR_LAT_MAX,
+        "n": CR_N,
+    },
+]
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -93,43 +161,56 @@ TIMEOUT = 20
 
 SENTINEL_TEMP = -67.8
 
-# How aggressive you want the top-right box to be
 TOPBOX_NAME_MAX = 26
 TOP_RAIN_N = 10
 
-TEMP_HARD_MIN = -30.0   # optional, keep or remove
-TEMP_HARD_MAX = 49.0    # your requirement
+TEMP_HARD_MIN = -30.0
+TEMP_HARD_MAX = 49.0
 
-# =========================
-# SHARED TEMP PALETTE (TMIN + TMAX)  (UNCHANGED)
-# =========================
 TEMP_VMIN = -25.0
 TEMP_VMAX = 45.0
 
+CRS_WGS84 = "EPSG:4326"
+CRS_EGSA87 = "EPSG:2100"
+WGS_TO_EGSA = Transformer.from_crs(CRS_WGS84, CRS_EGSA87, always_xy=True)
+EGSA_TO_WGS = Transformer.from_crs(CRS_EGSA87, CRS_WGS84, always_xy=True)
 
+AT_IDW_K = 8
+AT_IDW_POWER = 2
+AT_MAX_DISTANCE_M = 120_000
+AT_MIN_NEIGHBORS = 3
+AT_DISTANCE_MASK_M = 170_000
+
+LAPSE_DEFAULT = -0.0065
+LAPSE_MIN = -0.0150
+LAPSE_MAX = 0.0050
+LAPSE_K = 25
+LAPSE_RADIUS_M = 150_000
+LAPSE_MIN_NBR = 8
+LAPSE_ALT_RANGE_MIN_M = 200
+
+
+# =========================
+# SHARED TEMP PALETTE
+# =========================
 def build_shared_temp_cmap_norm():
-    # Goal:
-    # - Blue for <= 0°C (0°C is clearly blue, not white)
-    # - Positive temps move into blue-green/green, then yellow/orange/red
-    # - Very hot temps (>= ~40°C) shift into purple
     anchors = [
-        (-25.0, "#0b1d5c"),  # deep cold navy
-        (-18.0, "#123b8a"),  # dark blue
-        (-12.0, "#1f63c6"),  # blue
-        (-6.0,  "#2f8fe6"),  # lighter blue
-        (-2.0,  "#44b6ff"),  # icy blue
-        (0.0,   "#2b7bff"),  # 0°C = BLUE (important!)
-        (3.0,   "#2fb8d6"),  # blue-cyan
-        (7.0,   "#2fc4a0"),  # cyan-green
-        (12.0,  "#34c759"),  # green
-        (18.0,  "#b7dd2a"),  # yellow-green
-        (24.0,  "#ffe11a"),  # yellow
-        (30.0,  "#ff9a1a"),  # orange
-        (35.0,  "#ff4d1a"),  # red-orange
-        (40.0,  "#d1166f"),  # hot magenta
-        (45.0,  "#6a00a8"),  # purple (extreme heat)
+        (-25.0, "#0b1d5c"),
+        (-18.0, "#123b8a"),
+        (-12.0, "#1f63c6"),
+        (-6.0,  "#2f8fe6"),
+        (-2.0,  "#44b6ff"),
+        (0.0,   "#2b7bff"),
+        (3.0,   "#2fb8d6"),
+        (7.0,   "#2fc4a0"),
+        (12.0,  "#34c759"),
+        (18.0,  "#b7dd2a"),
+        (24.0,  "#ffe11a"),
+        (30.0,  "#ff9a1a"),
+        (35.0,  "#ff4d1a"),
+        (40.0,  "#d1166f"),
+        (45.0,  "#6a00a8"),
     ]
-
     vals = np.array([v for v, _ in anchors], dtype=float)
     cols = [c for _, c in anchors]
     t = (vals - TEMP_VMIN) / (TEMP_VMAX - TEMP_VMIN)
@@ -147,7 +228,7 @@ TEMP_CMAP, TEMP_NORM = build_shared_temp_cmap_norm()
 # =========================
 def _openssl_decrypt(enc_path: str, out_path: str, passphrase: str) -> None:
     if not passphrase:
-        raise SystemExit("GEOJSON_PASS not set (cannot decrypt encrypted assets).")
+        raise SystemExit("GEOJSON_PASS not set.")
     try:
         subprocess.check_call([
             "openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2",
@@ -155,7 +236,7 @@ def _openssl_decrypt(enc_path: str, out_path: str, passphrase: str) -> None:
             "-pass", "pass:" + passphrase
         ])
     except FileNotFoundError:
-        raise SystemExit("OpenSSL not found on runner. Install it or decrypt files in CI step.")
+        raise SystemExit("OpenSSL not found on runner.")
     except subprocess.CalledProcessError as e:
         raise SystemExit("OpenSSL decryption failed for %s: %s" % (enc_path, e))
 
@@ -164,32 +245,22 @@ def ensure_geojson_present() -> None:
     if os.path.exists(GEOJSON_PATH):
         return
     if not os.path.exists(GEOJSON_ENC):
-        raise SystemExit("Missing greece.geojson and greece.geojson.enc not found in repo root.")
+        raise SystemExit("Missing greece.geojson and greece.geojson.enc not found.")
     _openssl_decrypt(GEOJSON_ENC, GEOJSON_PATH, GEOJSON_PASS)
     if not os.path.exists(GEOJSON_PATH):
-        raise SystemExit("Decryption finished but greece.geojson still missing. Check paths.")
+        raise SystemExit("Decryption finished but greece.geojson still missing.")
 
 
 def ensure_dem_present() -> None:
-    # If VRT is already present at repo root, nothing to do
     if os.path.exists(DEM_PATH):
         return
-
-    # Try to decrypt and unzip if encrypted bundle exists
     if not os.path.exists(ALT_ENC):
-        raise SystemExit("Missing DEM: %s and altitude.zip.enc not found in repo root." % DEM_PATH)
-
+        raise SystemExit("Missing DEM and altitude.zip.enc not found.")
     _openssl_decrypt(ALT_ENC, ALT_ZIP, GEOJSON_PASS)
-
-    # Unzip into repo root so GRC_alt.vrt and its sidecars land next to this script
     with zipfile.ZipFile(ALT_ZIP, "r") as zf:
         zf.extractall(BASE_DIR)
-
-    # Verify VRT exists
     if not os.path.exists(DEM_PATH):
-        raise SystemExit("Decrypted altitude bundle did not produce GRC_alt.vrt at repo root.")
-
-    # Remove plaintext zip
+        raise SystemExit("Decrypted altitude bundle did not produce GRC_alt.vrt.")
     try:
         os.remove(ALT_ZIP)
     except Exception:
@@ -197,7 +268,7 @@ def ensure_dem_present() -> None:
 
 
 # =========================
-# TEXT HELPERS (TOP BOX)
+# TEXT HELPERS
 # =========================
 def prettify_station_name(s: str) -> str:
     if s is None:
@@ -246,8 +317,15 @@ def shorten_for_box(name: str, max_chars: int = TOPBOX_NAME_MAX) -> str:
     return ellipsize(s, max_chars=max_chars)
 
 
+def stamp_text(athens_now: datetime) -> str:
+    ts = athens_now.strftime("%Y-%m-%d %H:%M %Z")
+    if not BRAND_NAME:
+        raise SystemExit("BRAND_NAME is not set.")
+    return f"Δημιουργήθηκε για το {BRAND_NAME}\n" + ts
+
+
 # =========================
-# HELPERS
+# IO
 # =========================
 def fetch_weathernow_text(url: str) -> str:
     if not url:
@@ -258,7 +336,6 @@ def fetch_weathernow_text(url: str) -> str:
         try:
             r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
             if r.status_code == 415:
-                # Show what the server says it wants (often hints at required Accept/content type)
                 ct = r.headers.get("Content-Type", "")
                 print(f"🌧️ 415 Unsupported Media Type (Content-Type={ct})")
                 print("🌧️ First 200 bytes of response:", r.text[:200].replace("\n", " "))
@@ -270,7 +347,6 @@ def fetch_weathernow_text(url: str) -> str:
             print(f"🌧️ Attempt {i+1} failed: {e}")
             time.sleep(DELAY)
 
-    print("❌ All attempts to fetch data failed.")
     raise SystemExit(last_exc)
 
 
@@ -288,6 +364,9 @@ def read_tabbed_df(text: str) -> pd.DataFrame:
     return df
 
 
+# =========================
+# NUMERIC / GEO HELPERS
+# =========================
 def idw_fast(x, y, z, xi, yi, k=8, power=2, max_distance=1.0, min_neighbors=3):
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -329,12 +408,6 @@ def idw_fast(x, y, z, xi, yi, k=8, power=2, max_distance=1.0, min_neighbors=3):
 
 
 def sample_dem_robust(lons, lats, dem_path: str) -> np.ndarray:
-    """
-    Robust DEM sampling:
-    - sample exact point
-    - if NaN/nodata, sample a few tiny jitters around it (helps coastal/border pixels)
-    - if still NaN, fallback to 0 m
-    """
     if not os.path.exists(dem_path):
         raise FileNotFoundError(f"DEM not found at: {dem_path}")
 
@@ -373,28 +446,7 @@ def sample_dem_robust(lons, lats, dem_path: str) -> np.ndarray:
         return elev
 
 
-def upload_to_ftp(local_file: str, remote_name: str):
-    # Upload only if all credentials are present
-    if not (FTP_HOST and FTP_USER and FTP_PASS):
-        return
-
-    ftps = FTP_TLS()
-    ftps.connect(FTP_HOST, 21, timeout=30)
-    ftps.login(user=FTP_USER, passwd=FTP_PASS)
-    ftps.prot_p()
-    try:
-        with open(local_file, "rb") as f:
-            ftps.storbinary("STOR " + remote_name, f)
-        print(f"📤 Uploaded: {remote_name}")
-    finally:
-        try:
-            ftps.quit()
-        except Exception:
-            pass
-
-
 def build_geo_mask(grid_x, grid_y, greece_gdf) -> np.ndarray:
-    # Keep same behavior, but avoid deprecation if available
     if hasattr(greece_gdf.geometry, "union_all"):
         boundary = greece_gdf.geometry.union_all()
     else:
@@ -410,13 +462,13 @@ def build_geo_mask(grid_x, grid_y, greece_gdf) -> np.ndarray:
 def build_distance_mask(grid_x, grid_y, st_lons, st_lats, max_deg=1.5) -> np.ndarray:
     tree = cKDTree(np.c_[st_lons, st_lats])
     distances, _ = tree.query(np.c_[grid_x.ravel(), grid_y.ravel()])
-    return (distances.reshape(grid_x.shape) <= max_deg)
+    return distances.reshape(grid_x.shape) <= max_deg
 
 
 def estimate_local_lapse_rates(st_lons, st_lats, st_temp, st_elev,
-                              k=12, max_deg=1.2,
-                              default_lapse=-0.0065,
-                              clip_min=-0.015, clip_max=0.005) -> np.ndarray:
+                               k=12, max_deg=1.2,
+                               default_lapse=LAPSE_DEFAULT,
+                               clip_min=LAPSE_MIN, clip_max=LAPSE_MAX) -> np.ndarray:
     tree = cKDTree(np.c_[st_lons, st_lats])
     d, idx = tree.query(np.c_[st_lons, st_lats], k=min(k, len(st_temp)), distance_upper_bound=max_deg)
 
@@ -458,13 +510,82 @@ def estimate_local_lapse_rates(st_lons, st_lats, st_temp, st_elev,
     return lapses
 
 
-def stamp_text(athens_now: datetime) -> str:
-    ts = athens_now.strftime("%Y-%m-%d %H:%M %Z")
+def estimate_local_lapse_rates_egsa(st_x, st_y, st_temp, st_elev,
+                                    k=LAPSE_K, radius_m=LAPSE_RADIUS_M,
+                                    default_lapse=LAPSE_DEFAULT,
+                                    clip_min=LAPSE_MIN, clip_max=LAPSE_MAX) -> np.ndarray:
+    st_x = np.asarray(st_x, dtype=float)
+    st_y = np.asarray(st_y, dtype=float)
+    st_temp = np.asarray(st_temp, dtype=float)
+    st_elev = np.asarray(st_elev, dtype=float)
 
-    if not BRAND_NAME:
-        raise SystemExit("BRAND_NAME is not set (required for stamp text).")
+    tree = cKDTree(np.c_[st_x, st_y])
+    d, idx = tree.query(np.c_[st_x, st_y], k=min(k, len(st_temp)), distance_upper_bound=radius_m)
 
-    return f"Δημιουργήθηκε για το {BRAND_NAME}\n" + ts
+    if d.ndim == 1:
+        d = d[:, None]
+        idx = idx[:, None]
+
+    lapses = np.full(len(st_temp), np.nan, dtype=float)
+
+    for i in range(len(st_temp)):
+        neigh = idx[i]
+        dist = d[i]
+        ok = np.isfinite(dist) & (neigh < len(st_temp))
+        neigh = neigh[ok]
+
+        if neigh.size < LAPSE_MIN_NBR:
+            lapses[i] = default_lapse
+            continue
+
+        elev_n = st_elev[neigh]
+        t_n = st_temp[neigh]
+        good = np.isfinite(elev_n) & np.isfinite(t_n)
+        elev_n = elev_n[good]
+        t_n = t_n[good]
+
+        if elev_n.size < LAPSE_MIN_NBR or (np.nanmax(elev_n) - np.nanmin(elev_n)) < LAPSE_ALT_RANGE_MIN_M:
+            lapses[i] = default_lapse
+            continue
+
+        try:
+            b, _a = np.polyfit(elev_n, t_n, 1)
+            b = float(np.clip(b, clip_min, clip_max))
+            lapses[i] = b
+        except Exception:
+            lapses[i] = default_lapse
+
+    return lapses
+
+
+# =========================
+# PLOTTING HELPERS
+# =========================
+def save_stable(fig, out_dir: str, out_name: str):
+    os.makedirs(out_dir, exist_ok=True)
+
+    main_path = os.path.join(out_dir, out_name)
+    fig.savefig(main_path, dpi=300, bbox_inches="tight")
+    return main_path
+    
+def upload_to_ftp(local_file: str, remote_name: str):
+    if not (FTP_HOST and FTP_USER and FTP_PASS):
+        return
+
+    ftps = FTP_TLS()
+    ftps.connect(FTP_HOST, 21, timeout=30)
+    ftps.login(user=FTP_USER, passwd=FTP_PASS)
+    ftps.prot_p()
+    try:
+        with open(local_file, "rb") as f:
+            ftps.storbinary("STOR " + remote_name, f)
+        print(f"📤 Uploaded: {remote_name}")
+    finally:
+        try:
+            ftps.quit()
+        except Exception:
+            pass
+
 
 def add_top5_box(ax, title: str, lines: list, x0=0.99, y0=0.98):
     header = ax.text(
@@ -528,27 +649,186 @@ def draw_rank_markers(ax, df5: pd.DataFrame, lon_col="Longitude", lat_col="Latit
             continue
 
 
+def add_temp_contours_wgs(ax, grid_x, grid_y, field):
+    try:
+        ax.contour(grid_x, grid_y, field, levels=[0.0], colors="black", linewidths=1.2)
+    except Exception:
+        pass
+
+
+def add_temp_contours_egsa(ax, grid_x, grid_y, field):
+    levels = np.arange(-30, 46, 3, dtype=float)
+    thin_levels = [lv for lv in levels if abs(lv) > 1e-9]
+
+    cs_thin = None
+    cs_zero = None
+
+    try:
+        cs_thin = ax.contour(
+            grid_x, grid_y, field,
+            levels=thin_levels,
+            colors="black",
+            linewidths=0.6,
+            alpha=0.70
+        )
+    except Exception:
+        cs_thin = None
+
+    try:
+        cs_zero = ax.contour(
+            grid_x, grid_y, field,
+            levels=[0.0],
+            colors="black",
+            linewidths=1.3,
+            alpha=0.95
+        )
+    except Exception:
+        cs_zero = None
+
+    if cs_thin is not None:
+        try:
+            texts = ax.clabel(
+                cs_thin,
+                levels=cs_thin.levels[:],
+                inline=True,
+                inline_spacing=2,
+                fmt="%d",
+                fontsize=7
+            )
+            for t in texts:
+                t.set_path_effects([pe.withStroke(linewidth=2.0, foreground="white")])
+        except Exception:
+            pass
+
+    if cs_zero is not None:
+        try:
+            texts0 = ax.clabel(
+                cs_zero,
+                inline=True,
+                inline_spacing=2,
+                fmt="0",
+                fontsize=7
+            )
+            for t in texts0:
+                t.set_path_effects([pe.withStroke(linewidth=2.0, foreground="white")])
+        except Exception:
+            pass
+
+
+def temp_colorbar_national(ax, img):
+    ticks = [-25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30, 35, 40, 45]
+    cbar = plt.colorbar(img, ax=ax, orientation="vertical", extend="both")
+    cbar.set_ticks(ticks)
+    cbar.set_label("Θερμοκρασία (°C)", fontsize=12)
+    return cbar
+
+
+def temp_colorbar_regional(fig, ax, img):
+    cbar = fig.colorbar(img, ax=ax, orientation="vertical", extend="both",
+                        fraction=0.035, pad=0.02)
+    cbar.set_ticks([-25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30, 35, 40, 45])
+    cbar.set_label("Θερμοκρασία (°C)", fontsize=12)
+    return cbar
+
+
+def rain_cmap_norm():
+    cmap = ListedColormap([
+        "#ffffff", "#e3f2fd", "#90caf9", "#64b5f6", "#42a5f5",
+        "#1e88e5", "#6a1b9a", "#b71c1c", "#d32f2f", "#fb8c00", "#fdd835"
+    ])
+    bounds = [0, 0.1, 5, 10, 20, 30, 50, 75, 100, 150, 200, 1000]
+    norm = BoundaryNorm(boundaries=bounds, ncolors=cmap.N)
+    return cmap, norm, bounds
+
+
 # =========================
-# MAPS (UNCHANGED OUTPUTS)
+# DATA PREP
 # =========================
-def make_todayrain_map(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir, athens_now):
+def prepare_base_data(data: pd.DataFrame) -> pd.DataFrame:
+    for col in ["Latitude", "Longitude", "TodayRain", "TMin", "TMax", "TNow",
+                "RHNow", "Baronow", "WindDirNow", "WindSpeedNow", "RainIntensity"]:
+        if col in data.columns:
+            data[col] = pd.to_numeric(data[col], errors="coerce")
+
+    data = data[(data["Latitude"].notna()) & (data["Longitude"].notna())]
+    data = data[(data["Latitude"] != 0) & (data["Longitude"] != 0)]
+    data = data[data["Longitude"] <= 30]
+
+    data["Datetime"] = pd.to_datetime(data["Datetime"], errors="coerce")
+    if getattr(data["Datetime"].dt, "tz", None) is None:
+        data["Datetime"] = data["Datetime"].dt.tz_localize("Europe/Athens", nonexistent="shift_forward")
+    else:
+        data["Datetime"] = data["Datetime"].dt.tz_convert("Europe/Athens")
+
+    return data
+
+
+def prepare_today_data(data: pd.DataFrame, athens_now: datetime) -> pd.DataFrame:
+    today_start = athens_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_data = data[data["Datetime"] >= today_start].copy()
+
+    if "webcode" in today_data.columns:
+        wc = (
+            today_data["webcode"].astype(str)
+            .str.replace("\ufeff", "", regex=False)
+            .str.replace("ï»¿", "", regex=False)
+            .str.strip()
+            .str.lower()
+        )
+
+        exclude_ppn = {w.strip().lower() for w in EXCLUDE_PPN_WEBCODES}
+        exclude_all = {w.strip().lower() for w in EXCLUDE_ALL_WEBCODES}
+
+        mask = (
+            ~wc.str.match(r"(?i)^wu_lefkaditi$", na=False) &
+            ~wc.str.match(r"(?i)^age_klimamilou$", na=False) &
+            ~wc.str.match(r"(?i)^uoi_", na=False) &
+            ~wc.isin(exclude_ppn) &
+            ~wc.isin(exclude_all)
+        )
+        today_data = today_data[mask].copy()
+
+    return today_data
+
+
+def prepare_tmax_data(today_data: pd.DataFrame) -> pd.DataFrame:
+    tt0 = today_data.copy()
+
+    if "webcode" in tt0.columns:
+        exclude = {str(w).strip().lower() for w in EXCLUDE_TMAX_WEBCODES}
+        tt0["webcode_norm"] = (
+            tt0["webcode"].astype(str)
+            .str.replace("\ufeff", "", regex=False)
+            .str.replace("ï»¿", "", regex=False)
+            .str.strip()
+            .str.lower()
+        )
+        present = sorted(set(tt0.loc[tt0["webcode_norm"].isin(exclude), "webcode_norm"].unique()))
+        if present:
+            print("🔥 Excluding from Tmax:", present)
+        tt0 = tt0[~tt0["webcode_norm"].isin(exclude)].copy()
+
+    return tt0
+
+
+# =========================
+# NATIONAL MAPS
+# =========================
+def make_todayrain_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir, athens_now):
     if "TodayRain" not in df.columns:
         print("❌ TodayRain missing.")
-        return None
+        return (None, None)
 
     rr = df.copy()
     rr["TodayRain"] = pd.to_numeric(rr["TodayRain"], errors="coerce")
     rr.dropna(subset=["TodayRain", "Latitude", "Longitude"], inplace=True)
 
-    # Keep a copy for mapping (we want the map even if all stations are 0 mm)
     rr_map = rr.copy()
-
-    # For the Top box/markers, keep only stations with rain > 0
     rr_pos = rr_map[rr_map["TodayRain"] > 0].copy()
 
     if rr_map.empty:
         print("No valid TodayRain data.")
-        return None
+        return (None, None)
 
     st_lats = rr_map["Latitude"].to_numpy(dtype=float)
     st_lons = rr_map["Longitude"].to_numpy(dtype=float)
@@ -563,12 +843,7 @@ def make_todayrain_map(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir, athens
     out = np.full(grid_x.shape, np.nan)
     out[final_mask] = grid_val[final_mask]
 
-    cmap = ListedColormap([
-        "#ffffff", "#e3f2fd", "#90caf9", "#64b5f6", "#42a5f5",
-        "#1e88e5", "#6a1b9a", "#b71c1c", "#d32f2f", "#fb8c00", "#fdd835"
-    ])
-    bounds = [0, 0.1, 5, 10, 20, 30, 50, 75, 100, 150, 200, 1000]
-    norm = BoundaryNorm(boundaries=bounds, ncolors=cmap.N)
+    cmap, norm, bounds = rain_cmap_norm()
 
     fig, ax = plt.subplots(figsize=(12, 8))
     img = ax.imshow(
@@ -603,7 +878,6 @@ def make_todayrain_map(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir, athens
         bbox=dict(facecolor="white", edgecolor="none", boxstyle="round,pad=0.3")
     )
 
-    # ---------- TOP (rainy stations only) ----------
     if rr_pos.empty:
         add_top5_box(
             ax,
@@ -624,70 +898,56 @@ def make_todayrain_map(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir, athens
         add_top5_box(ax, f"Υψηλότερες {len(wet)} τιμές υετού", lines, x0=0.99, y0=0.98)
         draw_rank_markers(ax, wet, lon_col="Longitude", lat_col="Latitude")
 
-    os.makedirs(out_dir, exist_ok=True)
-    out_file = os.path.join(out_dir, "todayrain.png")
-    plt.savefig(out_file, dpi=300, bbox_inches="tight")
+    main_path = save_stable(fig, out_dir, "todayrain.png")
     plt.close(fig)
 
-    print(f"✅ Saved locally: {out_file}")
-    return out_file
+    print(f"✅ Saved: {main_path}")
+    return main_path, None
 
 
-def _temp_colorbar(ax, img):
-    ticks = [-25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30, 35, 40, 45]
-    cbar = plt.colorbar(img, ax=ax, orientation="vertical", extend="both")
-    cbar.set_ticks(ticks)
-    cbar.set_label("Θερμοκρασία (°C)", fontsize=12)
-    return cbar
+def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir,
+                           athens_now, dem_path, var_col, stable_name, title, box_title, sort_ascending):
+    if var_col not in df.columns:
+        print(f"❌ {var_col} missing.")
+        return (None, None)
 
-
-def make_tmin_map(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir, athens_now, dem_path):
-    if "TMin" not in df.columns:
-        print("❌ TMin missing.")
-        return None
-
-    # ---------- 1) numeric cleaning (NO DEM HERE) ----------
     tt0 = df.copy()
-    tt0["TMin"] = pd.to_numeric(tt0["TMin"], errors="coerce")
-    tt0.dropna(subset=["TMin", "Latitude", "Longitude"], inplace=True)
-    tt0 = tt0[~np.isclose(tt0["TMin"].to_numpy(dtype=float), SENTINEL_TEMP, atol=1e-6)]
-
-    # ---- HARD CAP (applies to TOP-5 + interpolation + map) ----
-    tt0 = tt0[(tt0["TMin"] <= TEMP_HARD_MAX)]
-    tt0 = tt0[(tt0["TMin"] >= TEMP_HARD_MIN)]
+    tt0[var_col] = pd.to_numeric(tt0[var_col], errors="coerce")
+    tt0.dropna(subset=[var_col, "Latitude", "Longitude"], inplace=True)
+    tt0 = tt0[~np.isclose(tt0[var_col].to_numpy(dtype=float), SENTINEL_TEMP, atol=1e-6)]
+    tt0 = tt0[(tt0[var_col] <= TEMP_HARD_MAX)]
+    tt0 = tt0[(tt0[var_col] >= TEMP_HARD_MIN)]
 
     if tt0.empty:
-        print("No valid Tmin data after hard cap.")
-        return None
+        print(f"No valid {var_col} data after hard cap.")
+        return (None, None)
 
-    # This is the dataset used for TOP-5: only needs value + location
     tt_rank = tt0.copy()
 
-    # ---------- 2) interpolation dataset (uses DEM) ----------
     st_lats = tt0["Latitude"].to_numpy(dtype=float)
     st_lons = tt0["Longitude"].to_numpy(dtype=float)
-    st_tmin = tt0["TMin"].to_numpy(dtype=float)
+    st_temp = tt0[var_col].to_numpy(dtype=float)
 
     st_elev = sample_dem_robust(st_lons, st_lats, dem_path)
 
-    ok = np.isfinite(st_tmin) & np.isfinite(st_lons) & np.isfinite(st_lats) & np.isfinite(st_elev)
+    ok = np.isfinite(st_temp) & np.isfinite(st_lons) & np.isfinite(st_lats) & np.isfinite(st_elev)
     st_lats = st_lats[ok]
     st_lons = st_lons[ok]
-    st_tmin = st_tmin[ok]
+    st_temp = st_temp[ok]
     st_elev = st_elev[ok]
 
-    if len(st_tmin) < 5:
-        print("❌ Too few stations with valid Tmin for interpolation.")
-        return None
+    if len(st_temp) < 5:
+        print(f"❌ Too few stations with valid {var_col} for interpolation.")
+        return (None, None)
 
     st_lapse = estimate_local_lapse_rates(
-        st_lons, st_lats, st_tmin, st_elev,
+        st_lons, st_lats, st_temp, st_elev,
         k=12, max_deg=1.2,
-        default_lapse=-0.0065,
-        clip_min=-0.015, clip_max=0.005
+        default_lapse=LAPSE_DEFAULT,
+        clip_min=LAPSE_MIN, clip_max=LAPSE_MAX
     )
 
-    st_t0 = st_tmin - (st_lapse * st_elev)
+    st_t0 = st_temp - (st_lapse * st_elev)
 
     t0_grid = idw_fast(st_lons, st_lats, st_t0, grid_x, grid_y, k=8, power=2,
                        max_distance=1.2, min_neighbors=3)
@@ -695,13 +955,13 @@ def make_tmin_map(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir, athens_now,
                           max_distance=1.2, min_neighbors=3)
 
     grid_elev = sample_dem_robust(grid_x.ravel(), grid_y.ravel(), dem_path).reshape(grid_x.shape)
-    tmin_grid = t0_grid + (lapse_grid * grid_elev)
+    temp_grid = t0_grid + (lapse_grid * grid_elev)
 
     dist_mask = build_distance_mask(grid_x, grid_y, st_lons, st_lats, max_deg=1.5)
     final_mask = geo_mask & dist_mask & np.isfinite(grid_elev)
 
     out = np.full(grid_x.shape, np.nan)
-    out[final_mask] = tmin_grid[final_mask]
+    out[final_mask] = temp_grid[final_mask]
 
     fig, ax = plt.subplots(figsize=(12, 8))
     img = ax.imshow(
@@ -714,15 +974,10 @@ def make_tmin_map(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir, athens_now,
     )
 
     greece_gdf.boundary.plot(ax=ax, color="black", linewidth=0.6)
+    add_temp_contours_wgs(ax, grid_x, grid_y, out)
+    temp_colorbar_national(ax, img)
 
-    try:
-        ax.contour(grid_x, grid_y, out, levels=[0.0], colors="black", linewidths=1.2)
-    except Exception:
-        pass
-
-    _temp_colorbar(ax, img)
-
-    ax.set_title("Ελάχιστη θερμοκρασία (προσαρμογή υψομέτρου)", fontsize=16)
+    ax.set_title(title, fontsize=16)
     ax.set_xlabel("Γεωγρ. μήκος", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
 
@@ -732,161 +987,307 @@ def make_tmin_map(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir, athens_now,
         bbox=dict(facecolor="white", edgecolor="none", boxstyle="round,pad=0.3")
     )
 
-    # ---------- TOP-5 from tt_rank (NO DEM INVOLVEMENT) ----------
     tt_rank["__name"] = tt_rank.apply(lambda r: safe_name_from_row(r, "citygr"), axis=1)
-    cold = tt_rank.sort_values("TMin", ascending=True).head(5)
+    rank_df = tt_rank.sort_values(var_col, ascending=sort_ascending).head(5)
 
     lines = []
-    for rank, (_, r) in enumerate(cold.iterrows(), start=1):
+    for rank, (_, r) in enumerate(rank_df.iterrows(), start=1):
         nm = shorten_for_box(r["__name"], max_chars=TOPBOX_NAME_MAX)
-        lines.append(f"{rank}. {nm}: {float(r['TMin']):.1f}°C")
+        lines.append(f"{rank}. {nm}: {float(r[var_col]):.1f}°C")
 
-    add_top5_box(ax, "Ψυχρότερες 5 περιοχές", lines, x0=0.99, y0=0.98)
-    draw_rank_markers(ax, cold, lon_col="Longitude", lat_col="Latitude")
+    add_top5_box(ax, box_title, lines, x0=0.99, y0=0.98)
+    draw_rank_markers(ax, rank_df, lon_col="Longitude", lat_col="Latitude")
 
-    os.makedirs(out_dir, exist_ok=True)
-    out_file = os.path.join(out_dir, "tmin.png")
-    plt.savefig(out_file, dpi=300, bbox_inches="tight")
+    main_path = save_stable(fig, out_dir, stable_name)
     plt.close(fig)
 
-    print(f"✅ Saved locally: {out_file}")
-    return out_file
-
-
-def make_tmax_map(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir, athens_now, dem_path):
-    if "TMax" not in df.columns:
-        print("❌ TMax missing.")
-        return None
-
-    # ---------- 1) exclusion + numeric cleaning (NO DEM HERE) ----------
-    tt0 = df.copy()
-
-    if "webcode" in tt0.columns:
-        exclude = {str(w).strip().lower() for w in EXCLUDE_TMAX_WEBCODES}
-        tt0["webcode_norm"] = (
-            tt0["webcode"].astype(str)
-            .str.replace("\ufeff", "", regex=False)
-            .str.replace("ï»¿", "", regex=False)
-            .str.strip()
-            .str.lower()
-        )
-        present = sorted(set(tt0.loc[tt0["webcode_norm"].isin(exclude), "webcode_norm"].unique()))
-        if present:
-            print("🔥 Excluding from Tmax:", present)
-        tt0 = tt0[~tt0["webcode_norm"].isin(exclude)].copy()
-
-    tt0["TMax"] = pd.to_numeric(tt0["TMax"], errors="coerce")
-    tt0.dropna(subset=["TMax", "Latitude", "Longitude"], inplace=True)
-    tt0 = tt0[~np.isclose(tt0["TMax"].to_numpy(dtype=float), SENTINEL_TEMP, atol=1e-6)]
-
-    # ---- HARD CAP (applies to TOP-5 + interpolation + map) ----
-    tt0 = tt0[(tt0["TMax"] <= TEMP_HARD_MAX)]
-    tt0 = tt0[(tt0["TMax"] >= TEMP_HARD_MIN)]
-
-    if tt0.empty:
-        print("No valid Tmax data after hard cap.")
-        return None
-
-    # This is the dataset used for TOP-5: only needs value + location
-    tt_rank = tt0.copy()
-
-    # ---------- 2) interpolation dataset (uses DEM) ----------
-    st_lats = tt0["Latitude"].to_numpy(dtype=float)
-    st_lons = tt0["Longitude"].to_numpy(dtype=float)
-    st_tmax = tt0["TMax"].to_numpy(dtype=float)
-
-    st_elev = sample_dem_robust(st_lons, st_lats, dem_path)
-
-    ok = np.isfinite(st_tmax) & np.isfinite(st_lons) & np.isfinite(st_lats) & np.isfinite(st_elev)
-    st_lats = st_lats[ok]
-    st_lons = st_lons[ok]
-    st_tmax = st_tmax[ok]
-    st_elev = st_elev[ok]
-
-    if len(st_tmax) < 5:
-        print("❌ Too few stations with valid Tmax for interpolation.")
-        return None
-
-    st_lapse = estimate_local_lapse_rates(
-        st_lons, st_lats, st_tmax, st_elev,
-        k=12, max_deg=1.2,
-        default_lapse=-0.0065,
-        clip_min=-0.015, clip_max=0.005
-    )
-
-    st_t0 = st_tmax - (st_lapse * st_elev)
-
-    t0_grid = idw_fast(st_lons, st_lats, st_t0, grid_x, grid_y, k=8, power=2,
-                       max_distance=1.2, min_neighbors=3)
-    lapse_grid = idw_fast(st_lons, st_lats, st_lapse, grid_x, grid_y, k=8, power=2,
-                          max_distance=1.2, min_neighbors=3)
-
-    grid_elev = sample_dem_robust(grid_x.ravel(), grid_y.ravel(), dem_path).reshape(grid_x.shape)
-    tmax_grid = t0_grid + (lapse_grid * grid_elev)
-
-    dist_mask = build_distance_mask(grid_x, grid_y, st_lons, st_lats, max_deg=1.5)
-    final_mask = geo_mask & dist_mask & np.isfinite(grid_elev)
-
-    out = np.full(grid_x.shape, np.nan)
-    out[final_mask] = tmax_grid[final_mask]
-
-    fig, ax = plt.subplots(figsize=(12, 8))
-    img = ax.imshow(
-        ma.masked_invalid(out),
-        extent=(GRID_LON_MIN, GRID_LON_MAX, GRID_LAT_MIN, GRID_LAT_MAX),
-        origin="lower",
-        cmap=TEMP_CMAP,
-        norm=TEMP_NORM,
-        alpha=0.95
-    )
-
-    greece_gdf.boundary.plot(ax=ax, color="black", linewidth=0.6)
-
-    try:
-        ax.contour(grid_x, grid_y, out, levels=[0.0], colors="black", linewidths=1.2)
-    except Exception:
-        pass
-
-    _temp_colorbar(ax, img)
-
-    ax.set_title("Μέγιστη θερμοκρασία (προσαρμογή υψομέτρου)", fontsize=16)
-    ax.set_xlabel("Γεωγρ. μήκος", fontsize=12)
-    ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
-
-    ax.text(
-        0.01, 0.01, stamp_text(athens_now),
-        transform=ax.transAxes, fontsize=10, color="black", ha="left", va="bottom",
-        bbox=dict(facecolor="white", edgecolor="none", boxstyle="round,pad=0.3")
-    )
-
-    # ---------- TOP-5 from tt_rank (NO DEM INVOLVEMENT) ----------
-    tt_rank["__name"] = tt_rank.apply(lambda r: safe_name_from_row(r, "citygr"), axis=1)
-    hot = tt_rank.sort_values("TMax", ascending=False).head(5)
-
-    lines = []
-    for rank, (_, r) in enumerate(hot.iterrows(), start=1):
-        nm = shorten_for_box(r["__name"], max_chars=TOPBOX_NAME_MAX)
-        lines.append(f"{rank}. {nm}: {float(r['TMax']):.1f}°C")
-
-    add_top5_box(ax, "Θερμότερες 5 περιοχές", lines, x0=0.99, y0=0.98)
-    draw_rank_markers(ax, hot, lon_col="Longitude", lat_col="Latitude")
-
-    os.makedirs(out_dir, exist_ok=True)
-    out_file = os.path.join(out_dir, "tmax.png")
-    plt.savefig(out_file, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-
-    print(f"✅ Saved locally: {out_file}")
-    return out_file
+    print(f"✅ Saved: {main_path}")
+    return main_path, None
 
 
 # =========================
-# MAIN (logic unchanged, only secure inputs/paths)
+# REGIONAL MAPS
+# =========================
+def region_bbox_to_egsa(region):
+    corners_lon = [region["lon_min"], region["lon_min"], region["lon_max"], region["lon_max"]]
+    corners_lat = [region["lat_min"], region["lat_max"], region["lat_min"], region["lat_max"]]
+    cx, cy = WGS_TO_EGSA.transform(corners_lon, corners_lat)
+    x_min, x_max = float(np.min(cx)), float(np.max(cx))
+    y_min, y_max = float(np.min(cy)), float(np.max(cy))
+    return x_min, x_max, y_min, y_max
+
+
+def build_region_masks_and_clip(greece_gdf_wgs, x_min, x_max, y_min, y_max, grid_x_m, grid_y_m):
+    greece_egsa = greece_gdf_wgs.to_crs(CRS_EGSA87)
+    greece_clip = greece_egsa.cx[x_min:x_max, y_min:y_max].copy()
+
+    if hasattr(greece_clip.geometry, "union_all"):
+        boundary = greece_clip.geometry.union_all()
+    else:
+        boundary = greece_clip.geometry.unary_union
+
+    grid_pts = gpd.GeoDataFrame(
+        geometry=gpd.points_from_xy(grid_x_m.ravel(), grid_y_m.ravel()),
+        crs=CRS_EGSA87
+    )
+    geo_mask = grid_pts.geometry.within(boundary).values.reshape(grid_x_m.shape)
+    return greece_clip, geo_mask
+
+
+def setup_regional_axes(ax, x_min, x_max, y_min, y_max):
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_aspect("equal", adjustable="box")
+
+    y_ref_for_lon = y_min
+    x_ref_for_lat = x_min
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+
+    def fmt_lon(x, pos):
+        lon, _lat = EGSA_TO_WGS.transform(x, y_ref_for_lon)
+        return f"{lon:.2f}"
+
+    def fmt_lat(y, pos):
+        _lon, lat = EGSA_TO_WGS.transform(x_ref_for_lat, y)
+        return f"{lat:.2f}"
+
+    ax.xaxis.set_major_formatter(FuncFormatter(fmt_lon))
+    ax.yaxis.set_major_formatter(FuncFormatter(fmt_lat))
+
+    ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
+    ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
+
+
+def make_todayrain_region_egsa(df, greece_gdf_wgs, region, out_dir, athens_now):
+    if "TodayRain" not in df.columns:
+        print("❌ TodayRain missing.")
+        return (None, None)
+
+    rr = df.copy()
+    rr["TodayRain"] = pd.to_numeric(rr["TodayRain"], errors="coerce")
+    rr.dropna(subset=["TodayRain", "Latitude", "Longitude"], inplace=True)
+
+    if rr.empty:
+        print(f"❌ No valid TodayRain data for {region['key']}.")
+        return (None, None)
+
+    x_min, x_max, y_min, y_max = region_bbox_to_egsa(region)
+
+    st_lon = rr["Longitude"].to_numpy(dtype=float)
+    st_lat = rr["Latitude"].to_numpy(dtype=float)
+    st_val = rr["TodayRain"].to_numpy(dtype=float)
+
+    st_x, st_y = WGS_TO_EGSA.transform(st_lon.tolist(), st_lat.tolist())
+    st_x = np.asarray(st_x, dtype=float)
+    st_y = np.asarray(st_y, dtype=float)
+
+    buf = 200_000.0
+    near = (st_x >= (x_min - buf)) & (st_x <= (x_max + buf)) & (st_y >= (y_min - buf)) & (st_y <= (y_max + buf))
+    st_x = st_x[near]
+    st_y = st_y[near]
+    st_val = st_val[near]
+
+    if len(st_val) < 5:
+        print(f"❌ Too few nearby rain stations for {region['key']}.")
+        return (None, None)
+
+    grid_x_m, grid_y_m = np.meshgrid(
+        np.linspace(x_min, x_max, region["n"]),
+        np.linspace(y_min, y_max, region["n"])
+    )
+
+    grid_val = idw_fast(
+        st_x, st_y, st_val, grid_x_m, grid_y_m,
+        k=AT_IDW_K, power=AT_IDW_POWER,
+        max_distance=AT_MAX_DISTANCE_M, min_neighbors=AT_MIN_NEIGHBORS
+    )
+
+    greece_clip, geo_mask = build_region_masks_and_clip(greece_gdf_wgs, x_min, x_max, y_min, y_max, grid_x_m, grid_y_m)
+
+    tree = cKDTree(np.c_[st_x, st_y])
+    d, _ = tree.query(np.c_[grid_x_m.ravel(), grid_y_m.ravel()])
+    dist_mask = d.reshape(grid_x_m.shape) <= AT_DISTANCE_MASK_M
+
+    final_mask = geo_mask & dist_mask
+
+    out = np.full(grid_x_m.shape, np.nan)
+    out[final_mask] = grid_val[final_mask]
+
+    cmap, norm, bounds = rain_cmap_norm()
+
+    fig, ax = plt.subplots(figsize=(10, 10), dpi=300)
+    img = ax.imshow(
+        ma.masked_invalid(out),
+        extent=(x_min, x_max, y_min, y_max),
+        origin="lower",
+        cmap=cmap,
+        norm=norm,
+        alpha=0.9
+    )
+
+    greece_clip.boundary.plot(ax=ax, color="black", linewidth=0.6)
+    setup_regional_axes(ax, x_min, x_max, y_min, y_max)
+
+    try:
+        ax.contour(
+            grid_x_m, grid_y_m, out,
+            levels=[0.2, 5, 10, 20, 30, 50, 75, 100, 150, 200],
+            colors="black", linewidths=1.0
+        )
+    except Exception:
+        pass
+
+    cbar = fig.colorbar(img, ax=ax, orientation="vertical", boundaries=bounds, extend="max",
+                        fraction=0.035, pad=0.02)
+    cbar.set_ticks([0, 0.1, 0.2, 5, 10, 20, 30, 50, 75, 100, 150, 200])
+    cbar.set_label("Σωρευτικός υετός (mm)", fontsize=12)
+
+    ax.set_title(region["title_rain"], fontsize=16, pad=10)
+
+    ax.text(
+        0.01, 0.01, stamp_text(athens_now),
+        transform=ax.transAxes, fontsize=9, color="black",
+        ha="left", va="bottom",
+        bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.3"),
+        path_effects=[pe.withStroke(linewidth=2.0, foreground="white")]
+    )
+
+    stable_name = f"todayrain_{region['key']}.png"
+    main_path = save_stable(fig, out_dir, stable_name)
+    plt.close(fig)
+
+    print(f"✅ Saved: {main_path}")
+    return main_path, None
+
+
+def make_temp_region_egsa(df, greece_gdf_wgs, region, out_dir, athens_now, dem_path,
+                          var_col, stable_name, title):
+    if var_col not in df.columns:
+        print(f"❌ {var_col} missing.")
+        return (None, None)
+
+    tt0 = df.copy()
+    tt0[var_col] = pd.to_numeric(tt0[var_col], errors="coerce")
+    tt0.dropna(subset=[var_col, "Latitude", "Longitude"], inplace=True)
+    tt0 = tt0[~np.isclose(tt0[var_col].to_numpy(dtype=float), SENTINEL_TEMP, atol=1e-6)]
+    tt0 = tt0[(tt0[var_col] <= TEMP_HARD_MAX)]
+    tt0 = tt0[(tt0[var_col] >= TEMP_HARD_MIN)]
+
+    if tt0.empty:
+        print(f"❌ No valid {var_col} data for {region['key']}.")
+        return (None, None)
+
+    x_min, x_max, y_min, y_max = region_bbox_to_egsa(region)
+
+    st_lon = tt0["Longitude"].to_numpy(dtype=float)
+    st_lat = tt0["Latitude"].to_numpy(dtype=float)
+    st_t = tt0[var_col].to_numpy(dtype=float)
+
+    st_x, st_y = WGS_TO_EGSA.transform(st_lon.tolist(), st_lat.tolist())
+    st_x = np.asarray(st_x, dtype=float)
+    st_y = np.asarray(st_y, dtype=float)
+
+    buf = 200_000.0
+    near = (st_x >= (x_min - buf)) & (st_x <= (x_max + buf)) & (st_y >= (y_min - buf)) & (st_y <= (y_max + buf))
+    st_lon = st_lon[near]
+    st_lat = st_lat[near]
+    st_t = st_t[near]
+    st_x = st_x[near]
+    st_y = st_y[near]
+
+    if len(st_t) < 8:
+        print(f"❌ Too few nearby stations for {var_col} in {region['key']}.")
+        return (None, None)
+
+    st_elev = sample_dem_robust(st_lon, st_lat, dem_path)
+
+    ok = np.isfinite(st_t) & np.isfinite(st_x) & np.isfinite(st_y) & np.isfinite(st_elev)
+    st_t = st_t[ok]
+    st_x = st_x[ok]
+    st_y = st_y[ok]
+    st_elev = st_elev[ok]
+
+    if len(st_t) < 8:
+        print(f"❌ Too few valid stations (after DEM) for {var_col} in {region['key']}.")
+        return (None, None)
+
+    st_lapse = estimate_local_lapse_rates_egsa(st_x, st_y, st_t, st_elev)
+    st_t0 = st_t - (st_lapse * st_elev)
+
+    grid_x_m, grid_y_m = np.meshgrid(
+        np.linspace(x_min, x_max, region["n"]),
+        np.linspace(y_min, y_max, region["n"])
+    )
+
+    t0_grid = idw_fast(
+        st_x, st_y, st_t0, grid_x_m, grid_y_m,
+        k=AT_IDW_K, power=AT_IDW_POWER,
+        max_distance=AT_MAX_DISTANCE_M, min_neighbors=AT_MIN_NEIGHBORS
+    )
+
+    lapse_grid = idw_fast(
+        st_x, st_y, st_lapse, grid_x_m, grid_y_m,
+        k=AT_IDW_K, power=AT_IDW_POWER,
+        max_distance=AT_MAX_DISTANCE_M, min_neighbors=AT_MIN_NEIGHBORS
+    )
+
+    glon, glat = EGSA_TO_WGS.transform(grid_x_m.ravel().tolist(), grid_y_m.ravel().tolist())
+    grid_elev = sample_dem_robust(np.array(glon, dtype=float), np.array(glat, dtype=float), dem_path).reshape(grid_x_m.shape)
+
+    t_grid = t0_grid + (lapse_grid * grid_elev)
+
+    greece_clip, geo_mask = build_region_masks_and_clip(greece_gdf_wgs, x_min, x_max, y_min, y_max, grid_x_m, grid_y_m)
+
+    tree = cKDTree(np.c_[st_x, st_y])
+    d, _ = tree.query(np.c_[grid_x_m.ravel(), grid_y_m.ravel()])
+    dist_mask = d.reshape(grid_x_m.shape) <= AT_DISTANCE_MASK_M
+
+    final_mask = geo_mask & dist_mask & np.isfinite(grid_elev)
+
+    out = np.full(grid_x_m.shape, np.nan)
+    out[final_mask] = t_grid[final_mask]
+
+    fig, ax = plt.subplots(figsize=(10, 10), dpi=300)
+    img = ax.imshow(
+        ma.masked_invalid(out),
+        extent=(x_min, x_max, y_min, y_max),
+        origin="lower",
+        cmap=TEMP_CMAP,
+        norm=TEMP_NORM,
+        alpha=0.95
+    )
+
+    greece_clip.boundary.plot(ax=ax, color="black", linewidth=0.6)
+
+    setup_regional_axes(ax, x_min, x_max, y_min, y_max)
+    add_temp_contours_egsa(ax, grid_x_m, grid_y_m, out)
+    temp_colorbar_regional(fig, ax, img)
+
+    ax.set_title(title, fontsize=16, pad=10)
+
+    ax.text(
+        0.01, 0.01, stamp_text(athens_now),
+        transform=ax.transAxes, fontsize=9, color="black",
+        ha="left", va="bottom",
+        bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.3"),
+        path_effects=[pe.withStroke(linewidth=2.0, foreground="white")]
+    )
+
+    main_path = save_stable(fig, out_dir, stable_name)
+    plt.close(fig)
+
+    print(f"✅ Saved: {main_path}")
+    return main_path, None
+
+
+# =========================
+# MAIN
 # =========================
 def main():
     print("✅ RUNNING FILE:", os.path.abspath(__file__))
-    print("✅ EXCLUDE_TMAX_WEBCODES:", EXCLUDE_TMAX_WEBCODES)
     print("✅ FTP enabled:", bool(FTP_HOST and FTP_USER and FTP_PASS))
+    print("✅ EXCLUDE_TMAX_WEBCODES:", EXCLUDE_TMAX_WEBCODES)
 
     ensure_geojson_present()
     ensure_dem_present()
@@ -899,52 +1300,18 @@ def main():
         print(list(data.columns))
         raise SystemExit(1)
 
-    for col in ["Latitude", "Longitude", "TodayRain", "TMin", "TMax", "TNow",
-                "RHNow", "Baronow", "WindDirNow", "WindSpeedNow", "RainIntensity"]:
-        if col in data.columns:
-            data[col] = pd.to_numeric(data[col], errors="coerce")
-
-    data = data[(data["Latitude"].notna()) & (data["Longitude"].notna())]
-    data = data[(data["Latitude"] != 0) & (data["Longitude"] != 0)]
-    data = data[data["Longitude"] <= 30]
-
-    data["Datetime"] = pd.to_datetime(data["Datetime"], errors="coerce")
-    if getattr(data["Datetime"].dt, "tz", None) is None:
-        data["Datetime"] = data["Datetime"].dt.tz_localize("Europe/Athens", nonexistent="shift_forward")
-    else:
-        data["Datetime"] = data["Datetime"].dt.tz_convert("Europe/Athens")
+    data = prepare_base_data(data)
 
     athens_now = datetime.now(ZoneInfo("Europe/Athens"))
-    today_start = athens_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_data = data[data["Datetime"] >= today_start].copy()
-
-    if "webcode" in today_data.columns:
-        wc = (
-            today_data["webcode"].astype(str)
-            .str.replace("\ufeff", "", regex=False)
-            .str.replace("ï»¿", "", regex=False)
-            .str.strip()
-            .str.lower()
-        )
-    
-        exclude_ppn = {w.strip().lower() for w in EXCLUDE_PPN_WEBCODES}
-        exclude_all = {w.strip().lower() for w in EXCLUDE_ALL_WEBCODES}
-    
-        mask = (
-            ~wc.str.match(r"(?i)^wu_lefkaditi$", na=False) &
-            ~wc.str.match(r"(?i)^age_klimamilou$", na=False) &
-            ~wc.str.match(r"(?i)^uoi_", na=False) &
-            ~wc.isin(exclude_ppn) &
-            ~wc.isin(exclude_all)
-        )
-        today_data = today_data[mask].copy()
-
+    today_data = prepare_today_data(data, athens_now)
 
     if today_data.empty:
-        print("No data after midnight filter.")
+        print("❌ No data after midnight filter.")
         return
 
     greece = gpd.read_file(GEOJSON_PATH)
+    if greece.crs is None:
+        greece = greece.set_crs(CRS_WGS84)
 
     grid_x, grid_y = np.meshgrid(
         np.linspace(GRID_LON_MIN, GRID_LON_MAX, GRID_N),
@@ -952,31 +1319,102 @@ def main():
     )
     geo_mask = build_geo_mask(grid_x, grid_y, greece)
 
-    rain_out = make_todayrain_map(
-        today_data, greece, grid_x, grid_y, geo_mask,
-        out_dir=os.path.join(BASE_DIR, "TodayRainMaps"),
-        athens_now=athens_now
+    # -------- Rain --------
+    rain_dir = os.path.join(BASE_DIR, "TodayRainMaps")
+    rain_main, _ = make_todayrain_map_national(
+        today_data, greece, grid_x, grid_y, geo_mask, rain_dir, athens_now
     )
 
-    tmin_out = make_tmin_map(
-        today_data, greece, grid_x, grid_y, geo_mask,
-        out_dir=os.path.join(BASE_DIR, "TminMaps"),
-        athens_now=athens_now,
-        dem_path=DEM_PATH
+    regional_rain = []
+    for region in REGIONS:
+        p_main, _ = make_todayrain_region_egsa(today_data, greece, region, rain_dir, athens_now)
+        regional_rain.append((region["key"], p_main, None))
+
+    # -------- Tmin --------
+    tmin_dir = os.path.join(BASE_DIR, "TminMaps")
+    tmin_main, _ = make_temp_map_national(
+        today_data, greece, grid_x, grid_y, geo_mask, tmin_dir,
+        athens_now, DEM_PATH,
+        var_col="TMin",
+        stable_name="tmin.png",
+        title="Ελάχιστη θερμοκρασία (προσαρμογή υψομέτρου)",
+        box_title="Ψυχρότερες 5 περιοχές",
+        sort_ascending=True
     )
 
-    tmax_out = make_tmax_map(
-        today_data, greece, grid_x, grid_y, geo_mask,
-        out_dir=os.path.join(BASE_DIR, "TmaxMaps"),
-        athens_now=athens_now,
-        dem_path=DEM_PATH
+    regional_tmin = []
+    for region in REGIONS:
+        if region["key"] == "attica":
+            stable = "tmin_attica.png"
+        elif region["key"] == "negreece":
+            stable = "tmin_negreece.png"
+        elif region["key"] == "swgreece":
+            stable = "tmin_swgreece.png"
+        elif region["key"] == "crete":
+            stable = "tmin_crete.png"
+        else:
+            continue
+
+        p_main, _ = make_temp_region_egsa(
+            today_data, greece, region, tmin_dir, athens_now, DEM_PATH,
+            var_col="TMin",
+            stable_name=stable,
+            title=region["title_tmin"]
+        )
+        regional_tmin.append((region["key"], p_main, None))
+
+    # -------- Tmax --------
+    tmax_input = prepare_tmax_data(today_data)
+    tmax_dir = os.path.join(BASE_DIR, "TmaxMaps")
+
+    tmax_main, _ = make_temp_map_national(
+        tmax_input, greece, grid_x, grid_y, geo_mask, tmax_dir,
+        athens_now, DEM_PATH,
+        var_col="TMax",
+        stable_name="tmax.png",
+        title="Μέγιστη θερμοκρασία (προσαρμογή υψομέτρου)",
+        box_title="Θερμότερες 5 περιοχές",
+        sort_ascending=False
     )
 
-    for local_path, remote_name in [
-        (rain_out, "todayrain.png"),
-        (tmin_out, "tmin.png"),
-        (tmax_out, "tmax.png"),
-    ]:
+    regional_tmax = []
+    for region in REGIONS:
+        if region["key"] == "attica":
+            stable = "tmax_attica.png"
+        elif region["key"] == "negreece":
+            stable = "tmax_negreece.png"
+        elif region["key"] == "swgreece":
+            stable = "tmax_swgreece.png"
+        elif region["key"] == "crete":
+            stable = "tmax_crete.png"
+        else:
+            continue
+
+        p_main, _ = make_temp_region_egsa(
+            tmax_input, greece, region, tmax_dir, athens_now, DEM_PATH,
+            var_col="TMax",
+            stable_name=stable,
+            title=region["title_tmax"]
+        )
+        regional_tmax.append((region["key"], p_main, None))
+
+    # -------- Upload stable filenames only --------
+    uploads = [
+        (rain_main, "todayrain.png"),
+        (tmin_main, "tmin.png"),
+        (tmax_main, "tmax.png"),
+    ]
+
+    for region_key, p_main, _ in regional_rain:
+        uploads.append((p_main, f"todayrain_{region_key}.png"))
+
+    for region_key, p_main, _ in regional_tmin:
+        uploads.append((p_main, f"tmin_{region_key}.png"))
+
+    for region_key, p_main, _ in regional_tmax:
+        uploads.append((p_main, f"tmax_{region_key}.png"))
+
+    for local_path, remote_name in uploads:
         if not local_path:
             continue
         try:
