@@ -1365,19 +1365,13 @@ def main():
         np.linspace(GRID_LAT_MIN, GRID_LAT_MAX, GRID_N)
     )
     geo_mask = build_geo_mask(grid_x, grid_y, greece)
-    region_contexts = prepare_region_contexts(greece)
+
     
     # -------- Rain --------
     rain_dir = os.path.join(BASE_DIR, "TodayRainMaps")
     rain_main, _ = make_todayrain_map_national(
         today_data, greece, grid_x, grid_y, geo_mask, rain_dir, athens_now
     )
-
-    regional_rain = []
-    for region in REGIONS:
-        ctx = region_contexts[region["key"]]
-        p_main, _ = make_todayrain_region_egsa(today_data, ctx, rain_dir, athens_now)
-        regional_rain.append((region["key"], p_main, None))
 
     # -------- Tmin --------
     tmin_dir = os.path.join(BASE_DIR, "TminMaps")
@@ -1390,28 +1384,6 @@ def main():
         box_title="Ψυχρότερες 5 περιοχές",
         sort_ascending=True
     )
-
-    regional_tmin = []
-    for region in REGIONS:
-        if region["key"] == "attica":
-            stable = "tmin_attica.png"
-        elif region["key"] == "negreece":
-            stable = "tmin_negreece.png"
-        elif region["key"] == "swgreece":
-            stable = "tmin_swgreece.png"
-        elif region["key"] == "crete":
-            stable = "tmin_crete.png"
-        else:
-            continue
-
-        ctx = region_contexts[region["key"]]
-        p_main, _ = make_temp_region_egsa(
-            today_data, ctx, tmin_dir, athens_now, DEM_PATH,
-            var_col="TMin",
-            stable_name=stable,
-            title=region["title_tmin"]
-        )
-        regional_tmin.append((region["key"], p_main, None))
 
 
     # -------- Tmax --------
@@ -1428,28 +1400,6 @@ def main():
         sort_ascending=False
     )
 
-    regional_tmax = []
-    for region in REGIONS:
-        if region["key"] == "attica":
-            stable = "tmax_attica.png"
-        elif region["key"] == "negreece":
-            stable = "tmax_negreece.png"
-        elif region["key"] == "swgreece":
-            stable = "tmax_swgreece.png"
-        elif region["key"] == "crete":
-            stable = "tmax_crete.png"
-        else:
-            continue
-
-        ctx = region_contexts[region["key"]]
-        p_main, _ = make_temp_region_egsa(
-            tmax_input, ctx, tmax_dir, athens_now, DEM_PATH,
-            var_col="TMax",
-            stable_name=stable,
-            title=region["title_tmax"]
-        )
-        regional_tmax.append((region["key"], p_main, None))
-
 
     # -------- Upload stable filenames only --------
     uploads = [
@@ -1457,15 +1407,6 @@ def main():
         (tmin_main, "tmin.png"),
         (tmax_main, "tmax.png"),
     ]
-
-    for region_key, p_main, _ in regional_rain:
-        uploads.append((p_main, f"todayrain_{region_key}.png"))
-
-    for region_key, p_main, _ in regional_tmin:
-        uploads.append((p_main, f"tmin_{region_key}.png"))
-
-    for region_key, p_main, _ in regional_tmax:
-        uploads.append((p_main, f"tmax_{region_key}.png"))
 
     try:
         upload_all_to_ftp(uploads)
