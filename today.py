@@ -611,7 +611,7 @@ def upload_all_to_ftp(files_to_upload):
             pass
 
 
-def add_top5_box(ax, title: str, lines: list, x0=0.99, y0=0.98):
+def add_top5_box(ax, title: str, lines: list, x0=0.99, y0=0.98, font_size=11, two_col_font_size=10.5, force_one_col=False):
     header = ax.text(
         x0, y0, title,
         transform=ax.transAxes, ha="right", va="top",
@@ -628,13 +628,13 @@ def add_top5_box(ax, title: str, lines: list, x0=0.99, y0=0.98):
         return
 
     max_len = max(len(s) for s in lines)
-    use_two_cols = max_len > 44
+    use_two_cols = (max_len > 44) and (not force_one_col)
 
     if not use_two_cols:
         ax.text(
             x0, y0 - 0.05, "\n".join(lines),
             transform=ax.transAxes, ha="right", va="top",
-            fontsize=11, color="black",
+            fontsize=font_size, color="black",
             bbox=dict(facecolor=(1, 1, 1, 0.0), edgecolor="none", boxstyle="round,pad=0.25"),
             zorder=10
         )
@@ -644,14 +644,14 @@ def add_top5_box(ax, title: str, lines: list, x0=0.99, y0=0.98):
         ax.text(
             0.60, y0 - 0.05, left,
             transform=ax.transAxes, ha="left", va="top",
-            fontsize=10.5, color="black",
+            fontsize=two_col_font_size, color="black",
             bbox=dict(facecolor=(1, 1, 1, 0.0), edgecolor="none", boxstyle="round,pad=0.25"),
             zorder=10
         )
         ax.text(
             x0, y0 - 0.05, right,
             transform=ax.transAxes, ha="right", va="top",
-            fontsize=10.5, color="black",
+            fontsize=two_col_font_size, color="black",
             bbox=dict(facecolor=(1, 1, 1, 0.0), edgecolor="none", boxstyle="round,pad=0.25"),
             zorder=10
         )
@@ -917,7 +917,7 @@ def make_todayrain_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_di
         lines = []
         for rank, (_, r) in enumerate(wet.iterrows(), start=1):
             nm = shorten_for_box(r["__name"], max_chars=TOPBOX_NAME_MAX)
-            lines.append(f"{rank}. {nm}: {float(r['TodayRain']):.1f} mm")
+            lines.append(f"{rank}. {nm}: {float(r['TodayRain']):.1f}".replace(".", ",") + " mm")
 
         add_top5_box(ax, f"Υψηλότερες {len(wet)} τιμές υετού", lines, x0=0.99, y0=0.98)
         draw_rank_markers(ax, wet, lon_col="Longitude", lat_col="Latitude")
@@ -1012,14 +1012,14 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir,
     )
 
     tt_rank["__name"] = tt_rank.apply(lambda r: safe_name_from_row(r, "citygr"), axis=1)
-    rank_df = tt_rank.sort_values(var_col, ascending=sort_ascending).head(5)
+    rank_df = tt_rank.sort_values(var_col, ascending=sort_ascending).head(15)
 
     lines = []
     for rank, (_, r) in enumerate(rank_df.iterrows(), start=1):
         nm = shorten_for_box(r["__name"], max_chars=TOPBOX_NAME_MAX)
-        lines.append(f"{rank}. {nm}: {float(r[var_col]):.1f}°C")
+        lines.append(f"{rank}. {nm}: {float(r[var_col]):.1f}".replace(".", ",") + "°C")
 
-    add_top5_box(ax, box_title, lines, x0=0.99, y0=0.98)
+    add_top5_box(ax, box_title, lines, x0=0.99, y0=0.98, font_size=8.2, two_col_font_size=8.2, force_one_col=True)
     draw_rank_markers(ax, rank_df, lon_col="Longitude", lat_col="Latitude")
 
     main_path = save_stable(fig, out_dir, stable_name)
@@ -1381,7 +1381,7 @@ def main():
         var_col="TMin",
         stable_name="tmin.png",
         title="Ελάχιστη θερμοκρασία (προσαρμογή υψομέτρου)",
-        box_title="Ψυχρότερες 5 περιοχές",
+        box_title="Ψυχρότερες 15 περιοχές",
         sort_ascending=True
     )
 
@@ -1396,7 +1396,7 @@ def main():
         var_col="TMax",
         stable_name="tmax.png",
         title="Μέγιστη θερμοκρασία (προσαρμογή υψομέτρου)",
-        box_title="Θερμότερες 5 περιοχές",
+        box_title="Θερμότερες 15 περιοχές",
         sort_ascending=False
     )
 
