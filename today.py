@@ -402,7 +402,9 @@ def idw_fast(x, y, z, xi, yi, k=8, power=2, max_distance=1.0, min_neighbors=3):
     num = np.sum(w * z_nei, axis=1)
     den = np.sum(w, axis=1)
 
-    zi_ok = np.where(den > 0, num / den, np.nan)
+    zi_ok = np.full_like(num, np.nan, dtype=float)
+    good = den > 0
+    zi_ok[good] = num[good] / den[good]
     zi[ok_pts] = zi_ok[ok_pts]
     return zi.reshape(xi.shape)
 
@@ -580,6 +582,28 @@ def upload_to_ftp(local_file: str, remote_name: str):
         with open(local_file, "rb") as f:
             ftps.storbinary("STOR " + remote_name, f)
         print(f"📤 Uploaded: {remote_name}")
+    finally:
+        try:
+            ftps.quit()
+        except Exception:
+            pass
+
+def upload_all_to_ftp(files_to_upload):
+    if not (FTP_HOST and FTP_USER and FTP_PASS):
+        return
+
+    ftps = FTP_TLS()
+    ftps.connect(FTP_HOST, 21, timeout=30)
+    ftps.login(user=FTP_USER, passwd=FTP_PASS)
+    ftps.prot_p()
+
+    try:
+        for local_file, remote_name in files_to_upload:
+            if not local_file or not os.path.exists(local_file):
+                continue
+            with open(local_file, "rb") as f:
+                ftps.storbinary("STOR " + remote_name, f)
+            print(f"📤 Uploaded: {remote_name}")
     finally:
         try:
             ftps.quit()
@@ -1016,23 +1040,44 @@ def region_bbox_to_egsa(region):
     y_min, y_max = float(np.min(cy)), float(np.max(cy))
     return x_min, x_max, y_min, y_max
 
-
-def build_region_masks_and_clip(greece_gdf_wgs, x_min, x_max, y_min, y_max, grid_x_m, grid_y_m):
+def prepare_region_contexts(greece_gdf_wgs):
     greece_egsa = greece_gdf_wgs.to_crs(CRS_EGSA87)
-    greece_clip = greece_egsa.cx[x_min:x_max, y_min:y_max].copy()
+    contexts = {}
 
-    if hasattr(greece_clip.geometry, "union_all"):
-        boundary = greece_clip.geometry.union_all()
-    else:
-        boundary = greece_clip.geometry.unary_union
+    for region in REGIONS:
+        x_min, x_max, y_min, y_max = region_bbox_to_egsa(region)
 
-    grid_pts = gpd.GeoDataFrame(
-        geometry=gpd.points_from_xy(grid_x_m.ravel(), grid_y_m.ravel()),
-        crs=CRS_EGSA87
-    )
-    geo_mask = grid_pts.geometry.within(boundary).values.reshape(grid_x_m.shape)
-    return greece_clip, geo_mask
+        grid_x_m, grid_y_m = np.meshgrid(
+            np.linspace(x_min, x_max, region["n"]),
+            np.linspace(y_min, y_max, region["n"])
+        )
 
+        greece_clip = greece_egsa.cx[x_min:x_max, y_min:y_max].copy()
+
+        if hasattr(greece_clip.geometry, "union_all"):
+            boundary = greece_clip.geometry.union_all()
+        else:
+            boundary = greece_clip.geometry.unary_union
+
+        grid_pts = gpd.GeoDataFrame(
+            geometry=gpd.points_from_xy(grid_x_m.ravel(), grid_y_m.ravel()),
+            crs=CRS_EGSA87
+        )
+        geo_mask = grid_pts.geometry.within(boundary).values.reshape(grid_x_m.shape)
+
+        contexts[region["key"]] = {
+            "region": region,
+            "x_min": x_min,
+            "x_max": x_max,
+            "y_min": y_min,
+            "y_max": y_max,
+            "grid_x_m": grid_x_m,
+            "grid_y_m": grid_y_m,
+            "greece_clip": greece_clip,
+            "geo_mask": geo_mask,
+        }
+
+    return contexts
 
 def setup_regional_axes(ax, x_min, x_max, y_min, y_max):
     ax.set_xlim(x_min, x_max)
@@ -1059,7 +1104,9 @@ def setup_regional_axes(ax, x_min, x_max, y_min, y_max):
     ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
 
 
-def make_todayrain_region_egsa(df, greece_gdf_wgs, region, out_dir, athens_now):
+def make_todayrain_region_egsa(df, ctx, out_dir, athens_now):
+    region = ctx["region"]
+
     if "TodayRain" not in df.columns:
         print("❌ TodayRain missing.")
         return (None, None)
@@ -1071,8 +1118,14 @@ def make_todayrain_region_egsa(df, greece_gdf_wgs, region, out_dir, athens_now):
     if rr.empty:
         print(f"❌ No valid TodayRain data for {region['key']}.")
         return (None, None)
-
-    x_min, x_max, y_min, y_max = region_bbox_to_egsa(region)
+    x_min = ctx["x_min"]
+    x_max = ctx["x_max"]
+    y_min = ctx["y_min"]
+    y_max = ctx["y_max"]
+    grid_x_m = ctx["grid_x_m"]
+    grid_y_m = ctx["grid_y_m"]
+    greece_clip = ctx["greece_clip"]
+    geo_mask = ctx["geo_mask"]
 
     st_lon = rr["Longitude"].to_numpy(dtype=float)
     st_lat = rr["Latitude"].to_numpy(dtype=float)
@@ -1092,18 +1145,11 @@ def make_todayrain_region_egsa(df, greece_gdf_wgs, region, out_dir, athens_now):
         print(f"❌ Too few nearby rain stations for {region['key']}.")
         return (None, None)
 
-    grid_x_m, grid_y_m = np.meshgrid(
-        np.linspace(x_min, x_max, region["n"]),
-        np.linspace(y_min, y_max, region["n"])
-    )
-
     grid_val = idw_fast(
         st_x, st_y, st_val, grid_x_m, grid_y_m,
         k=AT_IDW_K, power=AT_IDW_POWER,
         max_distance=AT_MAX_DISTANCE_M, min_neighbors=AT_MIN_NEIGHBORS
     )
-
-    greece_clip, geo_mask = build_region_masks_and_clip(greece_gdf_wgs, x_min, x_max, y_min, y_max, grid_x_m, grid_y_m)
 
     tree = cKDTree(np.c_[st_x, st_y])
     d, _ = tree.query(np.c_[grid_x_m.ravel(), grid_y_m.ravel()])
@@ -1161,8 +1207,10 @@ def make_todayrain_region_egsa(df, greece_gdf_wgs, region, out_dir, athens_now):
     return main_path, None
 
 
-def make_temp_region_egsa(df, greece_gdf_wgs, region, out_dir, athens_now, dem_path,
+def make_temp_region_egsa(df, ctx, out_dir, athens_now, dem_path,
                           var_col, stable_name, title):
+    region = ctx["region"]
+
     if var_col not in df.columns:
         print(f"❌ {var_col} missing.")
         return (None, None)
@@ -1177,8 +1225,14 @@ def make_temp_region_egsa(df, greece_gdf_wgs, region, out_dir, athens_now, dem_p
     if tt0.empty:
         print(f"❌ No valid {var_col} data for {region['key']}.")
         return (None, None)
-
-    x_min, x_max, y_min, y_max = region_bbox_to_egsa(region)
+    x_min = ctx["x_min"]
+    x_max = ctx["x_max"]
+    y_min = ctx["y_min"]
+    y_max = ctx["y_max"]
+    grid_x_m = ctx["grid_x_m"]
+    grid_y_m = ctx["grid_y_m"]
+    greece_clip = ctx["greece_clip"]
+    geo_mask = ctx["geo_mask"]
 
     st_lon = tt0["Longitude"].to_numpy(dtype=float)
     st_lat = tt0["Latitude"].to_numpy(dtype=float)
@@ -1215,11 +1269,6 @@ def make_temp_region_egsa(df, greece_gdf_wgs, region, out_dir, athens_now, dem_p
     st_lapse = estimate_local_lapse_rates_egsa(st_x, st_y, st_t, st_elev)
     st_t0 = st_t - (st_lapse * st_elev)
 
-    grid_x_m, grid_y_m = np.meshgrid(
-        np.linspace(x_min, x_max, region["n"]),
-        np.linspace(y_min, y_max, region["n"])
-    )
-
     t0_grid = idw_fast(
         st_x, st_y, st_t0, grid_x_m, grid_y_m,
         k=AT_IDW_K, power=AT_IDW_POWER,
@@ -1236,8 +1285,6 @@ def make_temp_region_egsa(df, greece_gdf_wgs, region, out_dir, athens_now, dem_p
     grid_elev = sample_dem_robust(np.array(glon, dtype=float), np.array(glat, dtype=float), dem_path).reshape(grid_x_m.shape)
 
     t_grid = t0_grid + (lapse_grid * grid_elev)
-
-    greece_clip, geo_mask = build_region_masks_and_clip(greece_gdf_wgs, x_min, x_max, y_min, y_max, grid_x_m, grid_y_m)
 
     tree = cKDTree(np.c_[st_x, st_y])
     d, _ = tree.query(np.c_[grid_x_m.ravel(), grid_y_m.ravel()])
@@ -1318,7 +1365,8 @@ def main():
         np.linspace(GRID_LAT_MIN, GRID_LAT_MAX, GRID_N)
     )
     geo_mask = build_geo_mask(grid_x, grid_y, greece)
-
+    region_contexts = prepare_region_contexts(greece)
+    
     # -------- Rain --------
     rain_dir = os.path.join(BASE_DIR, "TodayRainMaps")
     rain_main, _ = make_todayrain_map_national(
@@ -1327,7 +1375,8 @@ def main():
 
     regional_rain = []
     for region in REGIONS:
-        p_main, _ = make_todayrain_region_egsa(today_data, greece, region, rain_dir, athens_now)
+        ctx = region_contexts[region["key"]]
+        p_main, _ = make_todayrain_region_egsa(today_data, ctx, rain_dir, athens_now)
         regional_rain.append((region["key"], p_main, None))
 
     # -------- Tmin --------
@@ -1355,13 +1404,15 @@ def main():
         else:
             continue
 
+        ctx = region_contexts[region["key"]]
         p_main, _ = make_temp_region_egsa(
-            today_data, greece, region, tmin_dir, athens_now, DEM_PATH,
+            today_data, ctx, tmin_dir, athens_now, DEM_PATH,
             var_col="TMin",
             stable_name=stable,
             title=region["title_tmin"]
         )
         regional_tmin.append((region["key"], p_main, None))
+
 
     # -------- Tmax --------
     tmax_input = prepare_tmax_data(today_data)
@@ -1390,13 +1441,15 @@ def main():
         else:
             continue
 
+        ctx = region_contexts[region["key"]]
         p_main, _ = make_temp_region_egsa(
-            tmax_input, greece, region, tmax_dir, athens_now, DEM_PATH,
+            tmax_input, ctx, tmax_dir, athens_now, DEM_PATH,
             var_col="TMax",
             stable_name=stable,
             title=region["title_tmax"]
         )
         regional_tmax.append((region["key"], p_main, None))
+
 
     # -------- Upload stable filenames only --------
     uploads = [
@@ -1414,13 +1467,10 @@ def main():
     for region_key, p_main, _ in regional_tmax:
         uploads.append((p_main, f"tmax_{region_key}.png"))
 
-    for local_path, remote_name in uploads:
-        if not local_path:
-            continue
-        try:
-            upload_to_ftp(local_path, remote_name)
-        except Exception as e:
-            print(f"⚠️ FTP upload failed for {remote_name}: {e}")
+    try:
+        upload_all_to_ftp(uploads)
+    except Exception as e:
+        print(f"⚠️ Batch FTP upload failed: {e}")
 
 
 if __name__ == "__main__":
