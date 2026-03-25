@@ -162,7 +162,7 @@ TIMEOUT = 20
 SENTINEL_TEMP = -67.8
 
 TOPBOX_NAME_MAX = 26
-TOP_RAIN_N = 10
+TOP_RAIN_N = 15
 
 TEMP_HARD_MIN = -30.0
 TEMP_HARD_MAX = 49.0
@@ -917,7 +917,8 @@ def make_todayrain_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_di
         lines = []
         for rank, (_, r) in enumerate(wet.iterrows(), start=1):
             nm = shorten_for_box(r["__name"], max_chars=TOPBOX_NAME_MAX)
-            lines.append(f"{rank}. {nm}: {float(r['TodayRain']):.1f}".replace(".", ",") + " mm")
+            val_txt = f"{float(r['TodayRain']):.1f}".replace(".", ",")
+            lines.append(f"{rank}. {nm}: {val_txt} mm")
 
         add_top5_box(ax, f"Υψηλότερες {len(wet)} τιμές υετού", lines, x0=0.99, y0=0.98)
         draw_rank_markers(ax, wet, lon_col="Longitude", lat_col="Latitude")
@@ -1017,8 +1018,9 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir,
     lines = []
     for rank, (_, r) in enumerate(rank_df.iterrows(), start=1):
         nm = shorten_for_box(r["__name"], max_chars=TOPBOX_NAME_MAX)
-        lines.append(f"{rank}. {nm}: {float(r[var_col]):.1f}".replace(".", ",") + "°C")
-
+        val_txt = f"{float(r[var_col]):.1f}".replace(".", ",")
+        lines.append(f"{rank}. {nm}: {val_txt}°C")
+        
     add_top5_box(ax, box_title, lines, x0=0.99, y0=0.98, font_size=8.2, two_col_font_size=8.2, force_one_col=True)
     draw_rank_markers(ax, rank_df, lon_col="Longitude", lat_col="Latitude")
 
