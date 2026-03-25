@@ -611,11 +611,11 @@ def upload_all_to_ftp(files_to_upload):
             pass
 
 
-def add_top5_box(ax, title: str, lines: list, x0=0.99, y0=0.98, font_size=11, two_col_font_size=10.5, force_one_col=False):
+def add_top5_box(ax, title: str, lines: list, x0=0.99, y0=0.98, font_size=11, two_col_font_size=10.5, force_one_col=False, title_font_size=12):
     header = ax.text(
         x0, y0, title,
         transform=ax.transAxes, ha="right", va="top",
-        fontsize=12, color="black",
+        fontsize=title_font_size, color="black",
         bbox=dict(facecolor="white", edgecolor="black", boxstyle="round,pad=0.35"),
         zorder=10
     )
@@ -920,7 +920,17 @@ def make_todayrain_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_di
             val_txt = f"{float(r['TodayRain']):.1f}".replace(".", ",")
             lines.append(f"{rank}. {nm}: {val_txt} mm")
 
-        add_top5_box(ax, f"Υψηλότερες {len(wet)} τιμές υετού", lines, x0=0.99, y0=0.98)
+        add_top5_box(
+            ax,
+            f"Υψηλότερες {len(wet)} τιμές υετού",
+            lines,
+            x0=0.99,
+            y0=0.98,
+            font_size=8.2,
+            two_col_font_size=8.2,
+            force_one_col=True,
+            title_font_size=10
+        )
         draw_rank_markers(ax, wet, lon_col="Longitude", lat_col="Latitude")
 
     main_path = save_stable(fig, out_dir, "todayrain.png")
