@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 
 import os
-import re
 import io
 import zipfile
 import subprocess
@@ -10,6 +9,7 @@ from io import StringIO
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from ftplib import FTP_TLS
+from common_abbrev import shorten_for_box
 
 import numpy as np
 import pandas as pd
@@ -136,39 +136,6 @@ REGIONS = [
 # ======================
 # HELPERS
 # ======================
-ABBREV_RULES = [
-    (r"\bΣτρατιωτική\s+Σχολή\s+Ευελπίδων\b", "Στρατ. Σχ. Ευελπίδων"),
-    (r"\bΙερά\s+Μονή\b", "Ι.Μ."),
-    (r"\bΚαταφύγιο\b", "Καταφ."),
-    (r"\bΟροπέδιο\b", "Οροπ."),
-    (r"\bΝομισματοκοπείο\b", "Νομισμ."),
-    (r"\bΖωολογικό\b", "Ζωολ."),
-    (r"\bΠυροσβεστικού Σώματος\b", "Πυροσβ. Σώμ."),
-    (r"\bΌρος\b", "Όρ."),
-    (r"\bΆνω\b", "Ά."),
-    (r"\bΚάτω\b", "Κ."),
-    (r"\bΆγιος\b", "Άγ."),
-    (r"\bΑγία\b", "Αγ."),
-    (r"\bσταθμός\b", "στ."),
-    (r"\bλόφος\b", "λόφ."),
-]
-
-_abbrev_compiled = [
-    (re.compile(pat, flags=re.IGNORECASE), repl)
-    for pat, repl in ABBREV_RULES
-]
-
-
-def abbreviate_gr_name(s):
-    if not isinstance(s, str):
-        return s
-    out = s.strip()
-    if not out:
-        return out
-    for rx, repl in _abbrev_compiled:
-        out = rx.sub(repl, out)
-    out = re.sub(r"\s{2,}", " ", out).strip()
-    return out
 
 
 def station_name(row):
@@ -278,9 +245,8 @@ def build_top_text(region_df, top_n):
     lines = []
 
     for _, r in topn.iterrows():
-        name, is_citygr = station_name(r)
-        if is_citygr:
-            name = abbreviate_gr_name(name)
+        name, _ = station_name(r)
+        name = shorten_for_box(name, max_chars=26)
         mm = fmt_mm_gr(r["total_precipitation_missing"])
         if name and mm:
             lines.append(f"{name} {mm} mm")
@@ -297,15 +263,13 @@ def build_temp_top_text(region_df, top_n):
     lines = []
 
     for _, r in hotn.iterrows():
-        name, is_citygr = station_name(r)
-        if is_citygr:
-            name = abbreviate_gr_name(name)
+        name, _ = station_name(r)
+        name = shorten_for_box(name, max_chars=26)
         tv = fmt_c_gr(r["avg_tavg"])
         if name and tv:
             lines.append(f"{name} {tv}°C")
 
     return "\n".join(lines)
-
 
 def ensure_altitude_bundle():
     if os.path.exists(DEM_PATH):
