@@ -30,7 +30,6 @@
 #   pip install numpy pandas geopandas matplotlib scipy requests rasterio pyproj
 
 import os
-import re
 import time
 import shutil
 import subprocess, zipfile
@@ -38,7 +37,7 @@ from time import perf_counter
 from io import StringIO
 from datetime import datetime
 from zoneinfo import ZoneInfo
-
+from common_abbrev import shorten_for_box
 
 import numpy as np
 import numpy.ma as ma
@@ -162,39 +161,8 @@ def ensure_altitude_bundle():
 
 
 
-# ---------- TOP-5 BOX formatting (same abbreviations as today.py) ----------
+# ---------- TOP-5 BOX formatting (shared via common_abbrev.py) ----------
 TOPBOX_NAME_MAX = 26
-
-def prettify_station_name(s: str) -> str:
-    if s is None:
-        return "–"
-    s = str(s).strip()
-    s = s.replace("Μητροπολιτικό Πάρκο", "Πάρκο")
-    s = s.replace("Διεθνές Αεροδρόμιο", "Α/Δ")
-    s = s.replace("Αεροδρόμιο", "Α/Δ")
-    s = s.replace("Πανεπιστήμιο", "Παν.")
-    s = s.replace("Νοσοκομείο", "Νοσ.")
-    s = s.replace("Χιονοδρομικό κέντρο", "Χ/Κ")
-    s = s.replace("Καταφύγιο", "Καταφ.")
-    s = s.replace("Όρος", "Όρ.")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def ellipsize(s: str, max_chars: int = 42) -> str:
-    s = str(s)
-    if len(s) <= max_chars:
-        return s
-    return s[: max_chars - 1].rstrip() + "…"
-
-def shorten_for_box(name: str, max_chars: int = TOPBOX_NAME_MAX) -> str:
-    s = prettify_station_name(name)
-    if "(" in s and ")" in s:
-        base = s.split("(", 1)[0].strip()
-        if base:
-            s = base
-    s = s.replace("«", "").replace("»", "").replace('"', "").replace("'", "")
-    s = re.sub(r"\s+", " ", s).strip()
-    return ellipsize(s, max_chars=max_chars)
 
 
 # Shared palette (same as today.py)
