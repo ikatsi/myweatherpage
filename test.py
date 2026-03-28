@@ -48,7 +48,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from matplotlib.gridspec import GridSpec
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.ticker import FuncFormatter, MaxNLocator, FixedLocator
 
 import geopandas as gpd
@@ -199,6 +199,23 @@ def transparent_bbox(pad=0.3, rounded=True):
         boxstyle=boxstyle,
     )
 
+def reserve_right_legend_space(ax):
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="3%", pad=0.1)
+
+    cax.set_xticks([])
+    cax.set_yticks([])
+    cax.set_facecolor((1, 1, 1, 0.0))
+    for spine in cax.spines.values():
+        spine.set_visible(False)
+    cax.set_frame_on(False)
+
+    # Keep a real artist on the axis so bbox_inches='tight' preserves the space
+    cax.plot([0, 1], [0, 1], alpha=0.0)
+    cax.set_xlim(0, 1)
+    cax.set_ylim(0, 1)
+
+    return cax
 
 def athens_abbrev(dt: datetime) -> str:
     try:
@@ -571,17 +588,7 @@ def sample_rgba_to_projected_grid(src_rgba, src_extent, grid_x, grid_y, proj_to_
 def plot_greece_wgs84(product_label, region_name, bbox, src_rgba, src_extent, boundary_gdf, footer_right, footer_left, out_png):
     lon_min, lon_max, lat_min, lat_max = bbox
 
-    fig = plt.figure(figsize=FIGSIZE, dpi=DPI)
-    gs = GridSpec(1, 2, width_ratios=[1.0, 0.16], wspace=0.05, figure=fig)
-    ax = fig.add_subplot(gs[0, 0])
-    legend_ax = fig.add_subplot(gs[0, 1])
-    
-    legend_ax.set_xticks([])
-    legend_ax.set_yticks([])
-    legend_ax.set_facecolor((1, 1, 1, 0.0))
-    for spine in legend_ax.spines.values():
-        spine.set_visible(False)
-    legend_ax.set_frame_on(False)
+    fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI)
 
     ax.imshow(
         src_rgba,
@@ -621,8 +628,10 @@ def plot_greece_wgs84(product_label, region_name, bbox, src_rgba, src_extent, bo
         bbox=transparent_bbox(pad=0.3, rounded=True)
     )
 
-    plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.96)
-    plt.savefig(out_png, dpi=DPI, pad_inches=0)
+    spacer_ax = reserve_right_legend_space(ax)
+
+    plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
+    plt.savefig(out_png, dpi=DPI, bbox_inches="tight", bbox_extra_artists=[spacer_ax], pad_inches=0)
     plt.close(fig)
 
 
@@ -652,18 +661,8 @@ def plot_egsa_region(product_label, region_name, bbox, src_rgba, src_extent, gre
     except Exception:
         greece_clip = greece_egsa
 
-    fig = plt.figure(figsize=FIGSIZE, dpi=DPI)
-    gs = GridSpec(1, 2, width_ratios=[1.0, 0.16], wspace=0.05, figure=fig)
-    ax = fig.add_subplot(gs[0, 0])
-    legend_ax = fig.add_subplot(gs[0, 1])
-    
-    legend_ax.set_xticks([])
-    legend_ax.set_yticks([])
-    legend_ax.set_facecolor((1, 1, 1, 0.0))
-    for spine in legend_ax.spines.values():
-        spine.set_visible(False)
-    legend_ax.set_frame_on(False)
-  
+    fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI)
+
     ax.imshow(
         proj_rgba,
         extent=(x_min, x_max, y_min, y_max),
@@ -719,8 +718,10 @@ def plot_egsa_region(product_label, region_name, bbox, src_rgba, src_extent, gre
         bbox=transparent_bbox(pad=0.3, rounded=True)
     )
 
-    plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.96)
-    plt.savefig(out_png, dpi=DPI, pad_inches=0)
+    spacer_ax = reserve_right_legend_space(ax)
+
+    plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
+    plt.savefig(out_png, dpi=DPI, bbox_inches="tight", bbox_extra_artists=[spacer_ax], pad_inches=0)
     plt.close(fig)
 
 
@@ -743,17 +744,7 @@ def plot_cyprus_utm(product_label, region_name, bbox, src_rgba, src_extent, cypr
 
     proj_rgba = sample_rgba_to_projected_grid(src_rgba, src_extent, grid_E, grid_N, utm_to_wgs)
 
-    fig = plt.figure(figsize=FIGSIZE, dpi=DPI)
-    gs = GridSpec(1, 2, width_ratios=[1.0, 0.16], wspace=0.05, figure=fig)
-    ax = fig.add_subplot(gs[0, 0])
-    legend_ax = fig.add_subplot(gs[0, 1])
-
-    legend_ax.set_xticks([])
-    legend_ax.set_yticks([])
-    legend_ax.set_facecolor((1, 1, 1, 0.0))
-    for spine in legend_ax.spines.values():
-        spine.set_visible(False)
-    legend_ax.set_frame_on(False)
+    fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI)
 
     ax.imshow(
         proj_rgba,
@@ -818,8 +809,10 @@ def plot_cyprus_utm(product_label, region_name, bbox, src_rgba, src_extent, cypr
         bbox=transparent_bbox(pad=0.3, rounded=True)
     )
 
-    plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.96)
-    plt.savefig(out_png, dpi=DPI, pad_inches=0)
+    spacer_ax = reserve_right_legend_space(ax)
+
+    plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
+    plt.savefig(out_png, dpi=DPI, bbox_inches="tight", bbox_extra_artists=[spacer_ax], pad_inches=0)
     plt.close(fig)
 
 
