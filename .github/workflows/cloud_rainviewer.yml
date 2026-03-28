@@ -1,0 +1,70 @@
+name: Cloud and RainViewer maps
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      MPLBACKEND: Agg
+      GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
+      FTP_HOST: ${{ secrets.FTP_HOST }}
+      FTP_USER: ${{ secrets.FTP_USER }}
+      FTP_PASS: ${{ secrets.FTP_PASS }}
+      CLOUD_WMS_LAYER: ${{ vars.CLOUD_WMS_LAYER }}
+      RAIN_ZOOM: ${{ vars.RAIN_ZOOM }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-cloud-rainviewer-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-cloud-rainviewer-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gdal-bin \
+            libgdal-dev \
+            python3-gdal \
+            libproj-dev \
+            proj-data \
+            proj-bin \
+            libgeos-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install numpy requests pillow matplotlib geopandas shapely pyproj fiona
+          fi
+
+      - name: Run cloud_rainviewer.py
+        run: |
+          set -euo pipefail
+          python -V
+          python cloud_rainviewer.py --region all
+
+      - name: Upload generated PNGs as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-rainviewer-pngs
+          path: testmaps/*.png
+          if-no-files-found: warn
