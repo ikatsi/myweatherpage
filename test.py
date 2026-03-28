@@ -4,46 +4,59 @@
 """
 test.py
 
-Independent cloudiness and rain-layer test maps for the same domains used in
-rainintensityall.py.
+Independent map generator for:
+  - Cloudiness
+  - Rain
 
-What it does
-- Creates cloudiness PNGs from EUMETView WMS for:
-    Greece, Attica, Crete, NE Greece, SW Greece, Cyprus
-- Creates rain/radar PNGs from RainViewer mosaic tiles for the same domains
-- Uses greece.geojson (with the same decryption pattern as rainintensityall.py)
-  for Greece + Attica + Crete + NE Greece + SW Greece
-- Uses cyprus.geojson if present for Cyprus. If missing, Cyprus is still plotted
-  on its bbox without a coastline overlay.
-- Saves timestamped and static latest PNGs locally
-- Uploads both via FTPS using the same env secrets as rainintensityall.py
-- Prunes older remote timestamped PNGs per prefix, same logic as rainintensityall.py
+Regions:
+  - Greece (WGS84)
+  - Attica (EGSA87 / EPSG:2100)
+  - Crete (EGSA87 / EPSG:2100)
+  - NE Greece (EGSA87 / EPSG:2100)
+  - SW Greece (EGSA87 / EPSG:2100)
+  - Cyprus (UTM 36N / EPSG:32636)
 
-Notes
-- Cloud maps are image overlays from EUMETView WMS.
-- Rain maps are RainViewer radar mosaics, suitable for visual testing.
-- This script does not depend on docs/ or GitHub Pages.
+Key design goals:
+  - Same Greece/EGSA/Cyprus plotting logic as rainintensityall.py
+  - Same regional bboxes as rainintensityall.py
+  - Same right-side reserved legend space as rainintensityall.py
+  - Timestamped PNG + static latest PNG
+  - FTP upload + remote prune
+  - Manual GitHub Action friendly
 """
 
-import io
-import math
 import os
 import re
+import io
+import sys
+import math
+import time
 import shutil
 import socket
+import zipfile
+import random
+import argparse
 import subprocess
-import time
-import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import geopandas as gpd
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import requests
 from PIL import Image
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from matplotlib.ticker import FuncFormatter, MaxNLocator, FixedLocator
+
+import geopandas as gpd
+from shapely.geometry import box, Polygon, MultiPolygon
+from shapely.ops import unary_union
+
+from pyproj import Transformer
+
 from ftplib import FTP_TLS
 
 
@@ -52,42 +65,60 @@ from ftplib import FTP_TLS
 # =============================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ATHENS_TZ = ZoneInfo("Europe/Athens")
-USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) e-kairos-cloud-rain-test/2.0"
 
-# Optional FTP, same pattern as rainintensityall.py
+# Optional FTP
 FTP_HOST = os.environ.get("FTP_HOST", "").strip()
 FTP_USER = os.environ.get("FTP_USER", "").strip()
 FTP_PASS = os.environ.get("FTP_PASS", "").strip()
 
-# Assets
+# Greece encrypted assets
 GEOJSON_PASS = os.environ.get("GEOJSON_PASS", "").strip()
 GREECE_GEOJSON_PATH = os.path.join(BASE_DIR, "greece.geojson")
-GREECE_GEOJSON_ENC = os.path.join(BASE_DIR, "greece.geojson.enc")
+GREECE_GEOJSON_ENC  = os.path.join(BASE_DIR, "greece.geojson.enc")
+
+# Optional Cyprus asset
 CYPRUS_GEOJSON_PATH = os.path.join(BASE_DIR, "cyprus.geojson")
 
-# Local output folder only; upload is via FTPS
-OUTPUT_DIR = os.path.join(BASE_DIR, "testmaps")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Cloud source
+EUMETVIEW_WMS = "https://view.eumetsat.int/geoserver/wms"
+CLOUD_WMS_LAYER = os.environ.get("CLOUD_WMS_LAYER", "msg_fes:ir108").strip() or "msg_fes:ir108"
 
-# Cloud source: EUMETView WMS
-CLOUD_WMS_URL = os.environ.get("CLOUD_WMS_URL", "https://view.eumetsat.int/geoserver/wms").strip()
-CLOUD_WMS_LAYER = os.environ.get("CLOUD_WMS_LAYER", "msg_fes:clm").strip()
-CLOUD_WIDTH = int(os.environ.get("CLOUD_WIDTH", "1400"))
-CLOUD_HEIGHT = int(os.environ.get("CLOUD_HEIGHT", "1000"))
+# Rain source
+RAINVIEWER_API = "https://api.rainviewer.com/public/weather-maps.json"
+RAIN_ZOOM = int(os.environ.get("RAIN_ZOOM", "7").strip() or "7")
+if RAIN_ZOOM < 0:
+    RAIN_ZOOM = 0
+if RAIN_ZOOM > 7:
+    RAIN_ZOOM = 7
 
-# Rain source: RainViewer latest radar composite tiles
-RAINVIEWER_API = os.environ.get("RAINVIEWER_API", "https://api.rainviewer.com/public/weather-maps.json").strip()
-RAIN_ZOOM = int(os.environ.get("RAIN_ZOOM", "6"))
-RAIN_TILE_SIZE = int(os.environ.get("RAIN_TILE_SIZE", "512"))
-RAIN_COLOR_SCHEME = int(os.environ.get("RAIN_COLOR_SCHEME", "2"))
-RAIN_SMOOTH = int(os.environ.get("RAIN_SMOOTH", "1"))
-RAIN_SNOW = int(os.environ.get("RAIN_SNOW", "1"))
+# Rendering controls
+FIGSIZE = (10, 10)
+DPI = 300
+
+# source image sizes
+SOURCE_WMS_W = 768
+SOURCE_WMS_H = 768
+TARGET_GRID_N_GREECE = 700
+TARGET_GRID_N_REGION = 700
+TARGET_GRID_N_CYPRUS = 700
+
+# RainViewer rendering options
+RAIN_TILE_SIZE = 256
+RAIN_COLOR_SCHEME = 2      # Universal Blue
+RAIN_OPTIONS = "1_1"       # smoothed + snow colors
 
 
+# =============================================================================
+# REGION CONFIGS
+# =============================================================================
+# IMPORTANT:
+# bboxes below follow the EXACT SAME ORDER as rainintensityall.py:
+# (lon_min, lon_max, lat_min, lat_max)
 REGIONS = {
     "greece": {
         "name": "Greece",
-        "bbox": (19.0, 34.5, 30.0, 42.5),
+        "bbox": (19.0, 30.0, 34.5, 42.5),
+        "mode": "greece_wgs84",
         "boundary": "greece",
         "cloud_prefix": "cloudiness_",
         "cloud_latest": "latestcloudiness.png",
@@ -97,7 +128,8 @@ REGIONS = {
     },
     "attica": {
         "name": "Attica",
-        "bbox": (22.7, 37.5, 25.0, 38.7),
+        "bbox": (22.7, 25.0, 37.5, 38.7),
+        "mode": "egsa_region",
         "boundary": "greece",
         "cloud_prefix": "cloudiness_attica_",
         "cloud_latest": "latestcloudinessattica.png",
@@ -107,7 +139,8 @@ REGIONS = {
     },
     "crete": {
         "name": "Crete",
-        "bbox": (23.37, 34.7, 26.4, 35.78),
+        "bbox": (23.37, 26.4, 34.7, 35.78),
+        "mode": "egsa_region",
         "boundary": "greece",
         "cloud_prefix": "cloudiness_crete_",
         "cloud_latest": "latestcloudinesscrete.png",
@@ -117,7 +150,8 @@ REGIONS = {
     },
     "negreece": {
         "name": "NE Greece",
-        "bbox": (22.0, 39.7, 26.6, 41.8),
+        "bbox": (22.0, 26.6, 39.7, 41.8),
+        "mode": "egsa_region",
         "boundary": "greece",
         "cloud_prefix": "cloudiness_negreece_",
         "cloud_latest": "latestcloudinessnegreece.png",
@@ -127,7 +161,8 @@ REGIONS = {
     },
     "swgreece": {
         "name": "SW Greece",
-        "bbox": (20.0, 36.0, 24.0, 39.0),
+        "bbox": (20.0, 24.0, 36.0, 39.0),
+        "mode": "egsa_region",
         "boundary": "greece",
         "cloud_prefix": "cloudiness_swgreece_",
         "cloud_latest": "latestcloudinessswgreece.png",
@@ -137,22 +172,68 @@ REGIONS = {
     },
     "cyprus": {
         "name": "Cyprus",
-        "bbox": (32.0, 34.4, 34.9, 35.9),
+        "bbox": (32.0, 34.9, 34.4, 35.9),
+        "mode": "cyprus_utm",
         "boundary": "cyprus",
         "cloud_prefix": "cloudiness_cyprus_",
         "cloud_latest": "latestcloudinesscyprus.png",
         "rain_prefix": "rain_rate_cyprus_",
         "rain_latest": "latestrainratecyprus.png",
-        "remote_keep": 144,
+        "remote_keep": 200,
     },
 }
 
 
 # =============================================================================
-# HELPERS
+# SMALL HELPERS
 # =============================================================================
 def ftp_enabled():
     return bool(FTP_HOST and FTP_USER and FTP_PASS)
+
+
+def transparent_bbox(pad=0.3, rounded=True):
+    boxstyle = ("round,pad=" + str(pad)) if rounded else ("square,pad=" + str(pad))
+    return dict(
+        facecolor=(1, 1, 1, 0.0),
+        edgecolor=(0, 0, 0, 0.0),
+        boxstyle=boxstyle,
+    )
+
+
+def athens_abbrev(dt: datetime) -> str:
+    try:
+        dt_ath = dt.astimezone(ATHENS_TZ)
+        is_dst = bool(dt_ath.dst()) and dt_ath.dst() != timedelta(0)
+        return "EEST" if is_dst else "EET"
+    except Exception:
+        return "EET"
+
+
+def fmt_generated(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def ensure_greece_geojson():
+    if os.path.exists(GREECE_GEOJSON_PATH):
+        return
+
+    if not os.path.exists(GREECE_GEOJSON_ENC):
+        raise SystemExit("❌ Missing greece.geojson and greece.geojson.enc")
+
+    if not GEOJSON_PASS:
+        raise SystemExit("❌ GEOJSON_PASS not set")
+
+    try:
+        subprocess.check_call([
+            "openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2",
+            "-in", GREECE_GEOJSON_ENC,
+            "-out", GREECE_GEOJSON_PATH,
+            "-pass", "pass:" + GEOJSON_PASS
+        ])
+    except FileNotFoundError:
+        raise SystemExit("❌ OpenSSL not found on runner")
+    except subprocess.CalledProcessError as e:
+        raise SystemExit("❌ Failed to decrypt greece.geojson.enc: %s" % e)
 
 
 def ftps_connect_with_retries(host, user, passwd, attempts=6, base_sleep=5, timeout=60):
@@ -168,61 +249,50 @@ def ftps_connect_with_retries(host, user, passwd, attempts=6, base_sleep=5, time
         except (socket.gaierror, OSError) as e:
             last_err = e
             sleep_s = base_sleep * (2 ** i)
-            print(f"⚠️ FTPS connect failed ({type(e).__name__}: {e}). Retry in {sleep_s}s...")
+            print("⚠️ FTPS connect failed (%s: %s). Retry in %ss..." % (type(e).__name__, e, sleep_s))
             time.sleep(sleep_s)
     raise last_err
 
 
-def ftp_upload_file(local_file: str, timeout: int = 60):
+def ftp_upload_many_and_prune(upload_files, prune_specs):
     if not ftp_enabled():
-        print("ℹ️ FTP disabled (missing env). Skipping upload.")
+        print("ℹ️ FTP disabled (missing env). Skipping upload/prune.")
         return
 
-    remote_filename = os.path.basename(local_file)
-    ftps = ftps_connect_with_retries(FTP_HOST, FTP_USER, FTP_PASS, attempts=6, base_sleep=5, timeout=timeout)
-    try:
-        with open(local_file, "rb") as f:
-            ftps.storbinary("STOR " + remote_filename, f)
-        print(f"📤 Uploaded: {remote_filename}")
-    finally:
-        try:
-            ftps.quit()
-        except Exception:
-            pass
-
-
-def ftp_prune_timestamped(prefix: str, latest_name: str, keep: int):
-    if not ftp_enabled():
-        print("ℹ️ FTP disabled (missing env). Skipping remote prune.")
-        return
-
-    pat = re.compile(rf"^{re.escape(prefix)}\d{{4}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}}\.png$")
     ftps = ftps_connect_with_retries(FTP_HOST, FTP_USER, FTP_PASS, attempts=6, base_sleep=5, timeout=60)
     try:
+        for local_file in upload_files:
+            remote_filename = os.path.basename(local_file)
+            with open(local_file, "rb") as f:
+                ftps.storbinary("STOR " + remote_filename, f)
+            print("📤 Uploaded:", remote_filename)
+
+        # list once
         try:
             names = ftps.nlst()
         except Exception as e:
-            print("⚠️ Could not list remote directory:", e)
-            return
+            print("⚠️ Could not list remote directory for prune:", e)
+            names = []
 
         basenames = [os.path.basename(n) for n in names if n]
-        timestamped = [n for n in basenames if pat.match(n) and n != latest_name]
 
-        if not timestamped:
-            print(f"ℹ️ No timestamped PNGs to prune remotely for prefix {prefix}")
-            return
+        for prefix, latest_name, keep in prune_specs:
+            pat = re.compile(r"^" + re.escape(prefix) + r"\d{4}-\d{2}-\d{2}-\d{2}-\d{2}\.png$")
+            timestamped = [n for n in basenames if pat.match(n) and n != latest_name]
+            timestamped.sort()
 
-        timestamped.sort()
-        if len(timestamped) <= keep:
-            print(f"ℹ️ {len(timestamped)} timestamped files ≤ keep={keep} for {prefix}. Nothing to delete.")
-            return
+            if len(timestamped) <= keep:
+                print("ℹ️ %s timestamped files <= keep=%s. Nothing to delete." % (prefix, keep))
+                continue
 
-        for fname in timestamped[:-keep]:
-            try:
-                ftps.delete(fname)
-                print("🧹 Deleted old remote file:", fname)
-            except Exception as e:
-                print(f"⚠️ Failed to delete {fname}: {e}")
+            to_delete = timestamped[:-keep]
+            for fname in to_delete:
+                try:
+                    ftps.delete(fname)
+                    print("🧹 Deleted old remote file:", fname)
+                except Exception as e:
+                    print("⚠️ Failed to delete %s: %s" % (fname, e))
+
     finally:
         try:
             ftps.quit()
@@ -230,248 +300,307 @@ def ftp_prune_timestamped(prefix: str, latest_name: str, keep: int):
             pass
 
 
-def athens_abbrev(dt: datetime) -> str:
+def reserve_right_legend_space(ax):
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="3%", pad=0.1)
+    cax.set_axis_off()
+    return cax
+
+
+# =============================================================================
+# GEOMETRY HELPERS
+# =============================================================================
+def load_greece_wgs84():
+    ensure_greece_geojson()
+    greece = gpd.read_file(GREECE_GEOJSON_PATH)
+    if greece.crs is None:
+        greece = greece.set_crs("EPSG:4326")
+    if greece.crs.to_string() != "EPSG:4326":
+        greece = greece.to_crs("EPSG:4326")
+    return greece
+
+
+def load_greece_egsa87():
+    greece = load_greece_wgs84()
+    return greece.to_crs("EPSG:2100")
+
+
+def bounds_reasonable(geom, lon_min=31.0, lon_max=36.0, lat_min=34.0, lat_max=36.5):
     try:
-        dt_ath = dt.astimezone(ATHENS_TZ)
-        is_dst = bool(dt_ath.dst()) and dt_ath.dst() != timedelta(0)
-        return "EEST" if is_dst else "EET"
+        minx, miny, maxx, maxy = geom.bounds
+        return (lon_min <= minx <= lon_max) and (lon_min <= maxx <= lon_max) and \
+               (lat_min <= miny <= lat_max) and (lat_min <= maxy <= lat_max)
     except Exception:
-        return "EET"
+        return False
 
 
-def transparent_bbox(pad=0.3, rounded=True):
-    boxstyle = ("round,pad=" + str(pad)) if rounded else ("square,pad=" + str(pad))
-    return dict(
-        facecolor=(1, 1, 1, 0.0),
-        edgecolor=(0, 0, 0, 0.0),
-        boxstyle=boxstyle,
-    )
+def swap_geom(geom):
+    if isinstance(geom, Polygon):
+        x, y = geom.exterior.xy
+        return Polygon(np.column_stack([y, x]))
+    if isinstance(geom, MultiPolygon):
+        return MultiPolygon([swap_geom(g) for g in geom.geoms])
+    return geom
 
 
-def ensure_greece_geojson():
-    if os.path.exists(GREECE_GEOJSON_PATH):
-        return
-    if not os.path.exists(GREECE_GEOJSON_ENC):
-        raise SystemExit("❌ Missing greece.geojson and greece.geojson.enc")
-    if not GEOJSON_PASS:
-        raise SystemExit("❌ GEOJSON_PASS secret/env not set")
-
-    try:
-        subprocess.check_call([
-            "openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2",
-            "-in", GREECE_GEOJSON_ENC,
-            "-out", GREECE_GEOJSON_PATH,
-            "-pass", "pass:" + GEOJSON_PASS,
-        ])
-    except FileNotFoundError:
-        raise SystemExit("❌ OpenSSL not available on runner")
-    except subprocess.CalledProcessError as e:
-        raise SystemExit(f"❌ Failed to decrypt greece.geojson.enc: {e}")
-
-
-def load_boundary_geojson(path: str):
-    if not os.path.exists(path):
+def load_cyprus_wgs84_or_none():
+    if not os.path.exists(CYPRUS_GEOJSON_PATH):
         return None
-    gdf = gpd.read_file(path)
-    if gdf.crs is None:
-        gdf = gdf.set_crs("EPSG:4326")
-    elif gdf.crs.to_string() != "EPSG:4326":
-        gdf = gdf.to_crs("EPSG:4326")
-    return gdf
 
+    cyprus = gpd.read_file(CYPRUS_GEOJSON_PATH)
+    if cyprus.crs is None:
+        cyprus = cyprus.set_crs("EPSG:4326")
+    cyprus = cyprus[~cyprus.geometry.is_empty]
+    if not cyprus.geometry.is_valid.all():
+        cyprus.geometry = cyprus.buffer(0)
 
-SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": USER_AGENT})
-
-
-def fetch_bytes(url: str, params=None, timeout=180):
-    r = SESSION.get(url, params=params, timeout=timeout)
-    r.raise_for_status()
-    return r.content, r.headers
-
-
-def fetch_json(url: str, timeout=120):
-    r = SESSION.get(url, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
-
-
-# =============================================================================
-# CLOUDINESS (EUMETView WMS)
-# =============================================================================
-def get_latest_wms_time(endpoint: str, layer_name: str):
-    params = {
-        "service": "WMS",
-        "request": "GetCapabilities",
-        "version": "1.3.0",
-    }
-    data, _ = fetch_bytes(endpoint, params=params, timeout=180)
-    root = ET.fromstring(data)
-
-    def strip(tag):
-        return tag.split("}", 1)[-1] if "}" in tag else tag
-
-    latest = None
-    for layer in root.iter():
-        if strip(layer.tag) != "Layer":
-            continue
-        name = None
-        for child in layer:
-            if strip(child.tag) == "Name":
-                name = (child.text or "").strip()
-                break
-        if name != layer_name:
-            continue
-        for child in layer:
-            tag = strip(child.tag)
-            if tag not in ("Dimension", "Extent"):
-                continue
-            dim_name = (child.attrib.get("name") or child.attrib.get("Name") or "").lower()
-            if dim_name != "time":
-                continue
-            txt = (child.text or "").strip()
-            if not txt:
-                continue
-            if "," in txt:
-                latest = txt.split(",")[-1].strip()
-            elif "/" in txt:
-                latest = None
-            else:
-                latest = txt
-            break
-        break
-    return latest
-
-
-def fetch_cloud_image(extent):
-    lon_min, lat_min, lon_max, lat_max = extent
-    latest_time = None
     try:
-        latest_time = get_latest_wms_time(CLOUD_WMS_URL, CLOUD_WMS_LAYER)
-    except Exception as e:
-        print(f"⚠️ Could not determine WMS latest time for {CLOUD_WMS_LAYER}: {e}")
+        geom = cyprus.geometry.union_all()
+    except AttributeError:
+        geom = unary_union(cyprus.geometry)
 
+    if not bounds_reasonable(geom):
+        cyprus.geometry = cyprus.geometry.apply(swap_geom)
+
+    if cyprus.crs.to_string() != "EPSG:4326":
+        cyprus = cyprus.to_crs("EPSG:4326")
+
+    return cyprus
+
+
+def plot_boundary_proj(ax, geom, linewidth=0.5, color="black"):
+    if isinstance(geom, Polygon):
+        x, y = geom.exterior.xy
+        ax.plot(x, y, linewidth=linewidth, color=color, zorder=3)
+    elif isinstance(geom, MultiPolygon):
+        for poly in geom.geoms:
+            x, y = poly.exterior.xy
+            ax.plot(x, y, linewidth=linewidth, color=color, zorder=3)
+
+
+# =============================================================================
+# SOURCE FETCHERS
+# =============================================================================
+def fetch_cloud_wms_rgba(lon_min, lon_max, lat_min, lat_max, width=SOURCE_WMS_W, height=SOURCE_WMS_H):
     params = {
         "service": "WMS",
+        "version": "1.1.1",
         "request": "GetMap",
-        "version": "1.3.0",
         "layers": CLOUD_WMS_LAYER,
         "styles": "",
-        "crs": "EPSG:4326",
-        "bbox": f"{lat_min},{lon_min},{lat_max},{lon_max}",
-        "width": str(CLOUD_WIDTH),
-        "height": str(CLOUD_HEIGHT),
+        "srs": "EPSG:4326",
+        "bbox": "%.6f,%.6f,%.6f,%.6f" % (lon_min, lat_min, lon_max, lat_max),
+        "width": str(width),
+        "height": str(height),
         "format": "image/png",
-        "transparent": "FALSE",
+        "transparent": "true",
     }
-    if latest_time:
-        params["time"] = latest_time
 
-    data, headers = fetch_bytes(CLOUD_WMS_URL, params=params, timeout=240)
-    img = Image.open(io.BytesIO(data)).convert("RGBA")
-    return img, latest_time, headers
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "image/png,*/*;q=0.8",
+    }
 
+    r = requests.get(EUMETVIEW_WMS, params=params, headers=headers, timeout=90)
+    r.raise_for_status()
 
-# =============================================================================
-# RAIN (RainViewer mosaic)
-# =============================================================================
-def lonlat_to_tile_xy(lon, lat, zoom):
-    lat = max(min(lat, 85.05112878), -85.05112878)
-    n = 2 ** zoom
-    x = (lon + 180.0) / 360.0 * n
-    lat_rad = math.radians(lat)
-    y = (1.0 - math.log(math.tan(lat_rad) + (1.0 / math.cos(lat_rad))) / math.pi) / 2.0 * n
-    return x, y
+    img = Image.open(io.BytesIO(r.content)).convert("RGBA")
+    arr = np.array(img, dtype=np.uint8)
+
+    return arr, (lon_min, lon_max, lat_min, lat_max)
 
 
-def fetch_rainviewer_latest_frame():
-    meta = fetch_json(RAINVIEWER_API, timeout=180)
-    radar = meta.get("radar", {})
-    past = radar.get("past", [])
-    if not past:
-        raise RuntimeError("RainViewer returned no radar.past frames")
+def lonlat_to_tile_xy(lon_deg, lat_deg, z):
+    lat_rad = math.radians(max(min(lat_deg, 85.05112878), -85.05112878))
+    n = 2.0 ** z
+    xtile = (lon_deg + 180.0) / 360.0 * n
+    ytile = (1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n
+    return xtile, ytile
+
+
+def tile_xy_to_lonlat(xtile, ytile, z):
+    n = 2.0 ** z
+    lon_deg = xtile / n * 360.0 - 180.0
+    lat_rad = math.atan(math.sinh(math.pi * (1.0 - 2.0 * ytile / n)))
+    lat_deg = math.degrees(lat_rad)
+    return lon_deg, lat_deg
+
+
+def fetch_latest_rainviewer_frame_meta():
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,*/*;q=0.8",
+    }
+    r = requests.get(RAINVIEWER_API, headers=headers, timeout=60)
+    r.raise_for_status()
+    js = r.json()
+
+    host = js.get("host", "").strip()
+    radar = js.get("radar", {})
+    past = radar.get("past", []) or []
+    if not host or not past:
+        raise RuntimeError("RainViewer API returned no usable host/frame")
+
     frame = past[-1]
-    host = meta.get("host", "https://tilecache.rainviewer.com")
-    return {
-        "host": host.rstrip("/"),
-        "path": frame["path"],
-        "time": int(frame["time"]),
-        "generated": int(meta.get("generated", frame["time"])),
+    path = str(frame.get("path", "")).strip()
+    frame_time = frame.get("time")
+    if not path:
+        raise RuntimeError("RainViewer latest frame has no path")
+
+    return host, path, frame_time, js.get("generated")
+
+
+def fetch_rainviewer_rgba_for_bbox(lon_min, lon_max, lat_min, lat_max, z=RAIN_ZOOM, tile_size=RAIN_TILE_SIZE):
+    host, path, frame_time, api_generated = fetch_latest_rainviewer_frame_meta()
+
+    x0, y0 = lonlat_to_tile_xy(lon_min, lat_max, z)
+    x1, y1 = lonlat_to_tile_xy(lon_max, lat_min, z)
+
+    tx_min = int(math.floor(min(x0, x1)))
+    tx_max = int(math.floor(max(x0, x1)))
+    ty_min = int(math.floor(min(y0, y1)))
+    ty_max = int(math.floor(max(y0, y1)))
+
+    ntiles = 2 ** z
+    tx_min = max(0, min(tx_min, ntiles - 1))
+    tx_max = max(0, min(tx_max, ntiles - 1))
+    ty_min = max(0, min(ty_min, ntiles - 1))
+    ty_max = max(0, min(ty_max, ntiles - 1))
+
+    mosaic_w = (tx_max - tx_min + 1) * tile_size
+    mosaic_h = (ty_max - ty_min + 1) * tile_size
+    mosaic = np.zeros((mosaic_h, mosaic_w, 4), dtype=np.uint8)
+
+    session = requests.Session()
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "image/png,*/*;q=0.8",
     }
 
-
-def fetch_rain_mosaic(extent, zoom=6, tile_size=512):
-    lon_min, lat_min, lon_max, lat_max = extent
-    frame = fetch_rainviewer_latest_frame()
-
-    x0f, y1f = lonlat_to_tile_xy(lon_min, lat_min, zoom)
-    x1f, y0f = lonlat_to_tile_xy(lon_max, lat_max, zoom)
-
-    x0 = int(math.floor(min(x0f, x1f)))
-    x1 = int(math.floor(max(x0f, x1f)))
-    y0 = int(math.floor(min(y0f, y1f)))
-    y1 = int(math.floor(max(y0f, y1f)))
-
-    cols = x1 - x0 + 1
-    rows = y1 - y0 + 1
-    mosaic = Image.new("RGBA", (cols * tile_size, rows * tile_size), (255, 255, 255, 0))
-
-    for xt in range(x0, x1 + 1):
-        for yt in range(y0, y1 + 1):
-            tile_url = (
-                f"{frame['host']}{frame['path']}/"
-                f"{tile_size}/{zoom}/{xt}/{yt}/{RAIN_COLOR_SCHEME}/{RAIN_SMOOTH}_{RAIN_SNOW}.png"
+    for ty in range(ty_min, ty_max + 1):
+        for tx in range(tx_min, tx_max + 1):
+            url = "%s%s/%s/%s/%s/%s/%s/%s.png" % (
+                host,
+                path,
+                tile_size,
+                z,
+                tx,
+                ty,
+                RAIN_COLOR_SCHEME,
+                RAIN_OPTIONS
             )
-            try:
-                data, _ = fetch_bytes(tile_url, timeout=180)
-                tile = Image.open(io.BytesIO(data)).convert("RGBA")
-            except Exception as e:
-                print(f"⚠️ Failed tile z={zoom} x={xt} y={yt}: {e}")
-                tile = Image.new("RGBA", (tile_size, tile_size), (255, 255, 255, 0))
-            mosaic.paste(tile, ((xt - x0) * tile_size, (yt - y0) * tile_size))
+            r = session.get(url, headers=headers, timeout=60)
+            r.raise_for_status()
+            img = Image.open(io.BytesIO(r.content)).convert("RGBA")
+            arr = np.array(img, dtype=np.uint8)
 
-    px0 = (x0f - x0) * tile_size
-    px1 = (x1f - x0) * tile_size
-    py0 = (y0f - y0) * tile_size
-    py1 = (y1f - y0) * tile_size
+            x_off = (tx - tx_min) * tile_size
+            y_off = (ty - ty_min) * tile_size
+            mosaic[y_off:y_off + tile_size, x_off:x_off + tile_size, :] = arr
 
-    left = int(round(min(px0, px1)))
-    right = int(round(max(px0, px1)))
-    top = int(round(min(py0, py1)))
-    bottom = int(round(max(py0, py1)))
+    lon_left, lat_top = tile_xy_to_lonlat(tx_min, ty_min, z)
+    lon_right, lat_bottom = tile_xy_to_lonlat(tx_max + 1, ty_max + 1, z)
 
-    crop = mosaic.crop((left, top, right, bottom))
-    return crop, frame
+    meta = {
+        "frame_time": frame_time,
+        "api_generated": api_generated,
+        "host": host,
+        "path": path,
+        "z": z,
+    }
+
+    return mosaic, (lon_left, lon_right, lat_bottom, lat_top), meta
+
+
+# =============================================================================
+# SAMPLING / REPROJECTION
+# =============================================================================
+def bilinear_sample_rgba(src_rgba, src_extent, lon_grid, lat_grid):
+    """
+    src_extent = (lon_min, lon_max, lat_min, lat_max)
+    src_rgba shape = (H, W, 4)
+    lon_grid, lat_grid shape = (Ny, Nx)
+    """
+    lon_min, lon_max, lat_min, lat_max = src_extent
+    h, w, _ = src_rgba.shape
+
+    x = (lon_grid - lon_min) / (lon_max - lon_min) * (w - 1)
+    y = (lat_max - lat_grid) / (lat_max - lat_min) * (h - 1)
+
+    x0 = np.floor(x).astype(np.int32)
+    y0 = np.floor(y).astype(np.int32)
+    x1 = x0 + 1
+    y1 = y0 + 1
+
+    valid = (
+        np.isfinite(x) & np.isfinite(y) &
+        (x >= 0) & (x <= (w - 1)) &
+        (y >= 0) & (y <= (h - 1))
+    )
+
+    x0 = np.clip(x0, 0, w - 1)
+    x1 = np.clip(x1, 0, w - 1)
+    y0 = np.clip(y0, 0, h - 1)
+    y1 = np.clip(y1, 0, h - 1)
+
+    wa = (x1 - x) * (y1 - y)
+    wb = (x - x0) * (y1 - y)
+    wc = (x1 - x) * (y - y0)
+    wd = (x - x0) * (y - y0)
+
+    Ia = src_rgba[y0, x0].astype(np.float32)
+    Ib = src_rgba[y0, x1].astype(np.float32)
+    Ic = src_rgba[y1, x0].astype(np.float32)
+    Id = src_rgba[y1, x1].astype(np.float32)
+
+    out = (
+        Ia * wa[..., None] +
+        Ib * wb[..., None] +
+        Ic * wc[..., None] +
+        Id * wd[..., None]
+    )
+
+    out = np.clip(out, 0, 255).astype(np.uint8)
+    out[~valid] = 0
+    return out
+
+
+def sample_rgba_to_projected_grid(src_rgba, src_extent, grid_x, grid_y, proj_to_wgs):
+    lon_grid, lat_grid = proj_to_wgs.transform(grid_x, grid_y)
+    lon_grid = np.asarray(lon_grid, dtype=np.float64)
+    lat_grid = np.asarray(lat_grid, dtype=np.float64)
+    return bilinear_sample_rgba(src_rgba, src_extent, lon_grid, lat_grid)
 
 
 # =============================================================================
 # PLOTTING
 # =============================================================================
-def fmt_athens_from_unix(ts_utc):
-    if ts_utc is None:
-        return "—"
-    dt = datetime.fromtimestamp(int(ts_utc), tz=timezone.utc).astimezone(ATHENS_TZ)
-    return dt.strftime("%Y-%m-%d %H:%M %Z")
+def plot_greece_wgs84(product_label, region_name, bbox, src_rgba, src_extent, boundary_gdf, footer_right, footer_left, out_png):
+    lon_min, lon_max, lat_min, lat_max = bbox
 
+    fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI)
 
-def save_map(image_rgba, boundary_gdf, extent, title, left_text, right_text, out_path):
-    lon_min, lat_min, lon_max, lat_max = extent
-    fig, ax = plt.subplots(figsize=(10, 10), dpi=220)
-    ax.imshow(np.asarray(image_rgba), extent=(lon_min, lon_max, lat_min, lat_max), origin="upper")
+    ax.imshow(
+        src_rgba,
+        extent=(src_extent[0], src_extent[1], src_extent[2], src_extent[3]),
+        origin="upper",
+        interpolation="nearest"
+    )
 
-    if boundary_gdf is not None and not boundary_gdf.empty:
-        boundary_gdf.boundary.plot(ax=ax, color="black", linewidth=0.6)
+    boundary_gdf.boundary.plot(ax=ax, color="black", linewidth=0.5)
 
     ax.set_xlim(lon_min, lon_max)
     ax.set_ylim(lat_min, lat_max)
-    ax.set_xlabel("Γεωγρ. μήκος", fontsize=11)
-    ax.set_ylabel("Γεωγρ. πλάτος", fontsize=11)
-    ax.set_title(title, fontsize=14, pad=10, loc="center")
-    ax.grid(True, linewidth=0.25, alpha=0.35)
+
+    ax.set_title("Υπολογ. τελευταία διαθέσιμη %s %s" % (product_label, region_name), fontsize=14, pad=10, loc="center")
+    ax.set_xlabel("Γεωγρ. μήκος", fontsize=12)
+    ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
+    ax.grid(True, linewidth=0.3, alpha=0.4)
+
     ax.text(
-        0.01, 0.01, left_text,
+        0.01, 0.01, footer_left,
         transform=ax.transAxes,
         fontsize=8,
         color="black",
@@ -480,7 +609,7 @@ def save_map(image_rgba, boundary_gdf, extent, title, left_text, right_text, out
         bbox=transparent_bbox(pad=0.3, rounded=True)
     )
     ax.text(
-        0.99, 0.01, right_text,
+        0.99, 0.01, footer_right,
         transform=ax.transAxes,
         fontsize=8,
         color="black",
@@ -489,109 +618,339 @@ def save_map(image_rgba, boundary_gdf, extent, title, left_text, right_text, out
         bbox=transparent_bbox(pad=0.3, rounded=True)
     )
 
+    reserve_right_legend_space(ax)
     plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
-    plt.savefig(out_path, bbox_inches="tight", pad_inches=0.05)
+    plt.savefig(out_png, dpi=DPI, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
-    print(f"✅ Saved: {out_path}")
 
 
-# =============================================================================
-# RUNNERS
-# =============================================================================
-def render_one_product(kind: str, region_key: str, region_cfg: dict, boundary_gdf):
-    athens_now = datetime.now(ATHENS_TZ)
-    ts = athens_now.strftime("%Y-%m-%d-%H-%M")
-    timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M") + f" {athens_abbrev(athens_now)}"
-    extent = region_cfg["bbox"]
+def plot_egsa_region(product_label, region_name, bbox, src_rgba, src_extent, greece_egsa, footer_right, footer_left, out_png):
+    lon_min, lon_max, lat_min, lat_max = bbox
 
-    if kind == "cloud":
-        prefix = region_cfg["cloud_prefix"]
-        latest_name = region_cfg["cloud_latest"]
-        out_png = os.path.join(OUTPUT_DIR, f"{prefix}{ts}.png")
-        out_latest = os.path.join(OUTPUT_DIR, latest_name)
+    wgs_to_egsa = Transformer.from_crs("EPSG:4326", "EPSG:2100", always_xy=True)
+    egsa_to_wgs = Transformer.from_crs("EPSG:2100", "EPSG:4326", always_xy=True)
 
-        cloud_img, cloud_time, _headers = fetch_cloud_image(extent)
-        left_text = (
-            f"Δημιουργήθηκε για το e-kairos.gr\n"
-            f"{timestamp_text}\n"
-            f"Πηγή: EUMETView WMS"
-        )
-        right_text = (
-            f"Layer: {CLOUD_WMS_LAYER}\n"
-            f"Χρόνος layer: {cloud_time or 'latest/default'}"
-        )
-        title = f"Υπολογ. τελευταία διαθέσιμη νέφωση {region_cfg['name']}"
+    corners_lon = [lon_min, lon_min, lon_max, lon_max]
+    corners_lat = [lat_min, lat_max, lat_min, lat_max]
+    corners_x, corners_y = wgs_to_egsa.transform(corners_lon, corners_lat)
+    x_min, x_max = float(np.min(corners_x)), float(np.max(corners_x))
+    y_min, y_max = float(np.min(corners_y)), float(np.max(corners_y))
 
-        save_map(cloud_img, boundary_gdf, extent, title, left_text, right_text, out_png)
-        shutil.copy(out_png, out_latest)
-        print(f"✅ Saved: {out_latest}")
+    grid_x, grid_y = np.meshgrid(
+        np.linspace(x_min, x_max, TARGET_GRID_N_REGION),
+        np.linspace(y_min, y_max, TARGET_GRID_N_REGION)
+    )
 
+    proj_rgba = sample_rgba_to_projected_grid(src_rgba, src_extent, grid_x, grid_y, egsa_to_wgs)
+
+    bbox_poly = box(x_min, y_min, x_max, y_max)
+    bbox_gdf = gpd.GeoDataFrame(geometry=[bbox_poly], crs="EPSG:2100")
+    try:
+        greece_clip = gpd.clip(greece_egsa, bbox_gdf)
+    except Exception:
+        greece_clip = greece_egsa
+
+    fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI)
+
+    ax.imshow(
+        proj_rgba,
+        extent=(x_min, x_max, y_min, y_max),
+        origin="upper",
+        interpolation="nearest"
+    )
+
+    greece_clip.boundary.plot(ax=ax, color="black", linewidth=0.5)
+
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_aspect("equal", adjustable="box")
+
+    y_ref_for_lon = y_min
+    x_ref_for_lat = x_min
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+
+    def fmt_lon(x, pos):
+        lon, _ = egsa_to_wgs.transform(x, y_ref_for_lon)
+        return "%.2f" % lon
+
+    def fmt_lat(y, pos):
+        _, lat = egsa_to_wgs.transform(x_ref_for_lat, y)
+        return "%.2f" % lat
+
+    ax.xaxis.set_major_formatter(FuncFormatter(fmt_lon))
+    ax.yaxis.set_major_formatter(FuncFormatter(fmt_lat))
+
+    ax.set_title("Υπολογ. τελευταία διαθέσιμη %s %s" % (product_label, region_name), fontsize=14, pad=10, loc="center")
+    ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
+    ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
+    ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
+
+    ax.grid(True, linewidth=0.3, alpha=0.4)
+
+    ax.text(
+        0.01, 0.01, footer_left,
+        transform=ax.transAxes,
+        fontsize=8,
+        color="black",
+        ha="left",
+        va="bottom",
+        bbox=transparent_bbox(pad=0.3, rounded=True)
+    )
+    ax.text(
+        0.99, 0.01, footer_right,
+        transform=ax.transAxes,
+        fontsize=8,
+        color="black",
+        ha="right",
+        va="bottom",
+        bbox=transparent_bbox(pad=0.3, rounded=True)
+    )
+
+    reserve_right_legend_space(ax)
+    plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
+    plt.savefig(out_png, dpi=DPI, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
+
+
+def plot_cyprus_utm(product_label, region_name, bbox, src_rgba, src_extent, cyprus_wgs, footer_right, footer_left, out_png):
+    lon_min, lon_max, lat_min, lat_max = bbox
+
+    to_utm = Transformer.from_crs("EPSG:4326", "EPSG:32636", always_xy=True)
+    utm_to_wgs = Transformer.from_crs("EPSG:32636", "EPSG:4326", always_xy=True)
+
+    corn_lon = np.array([lon_min, lon_max, lon_min, lon_max])
+    corn_lat = np.array([lat_min, lat_min, lat_max, lat_max])
+    corn_E, corn_N = to_utm.transform(corn_lon, corn_lat)
+    e_min, e_max = float(np.min(corn_E)), float(np.max(corn_E))
+    n_min, n_max = float(np.min(corn_N)), float(np.max(corn_N))
+
+    grid_E, grid_N = np.meshgrid(
+        np.linspace(e_min, e_max, TARGET_GRID_N_CYPRUS),
+        np.linspace(n_min, n_max, TARGET_GRID_N_CYPRUS)
+    )
+
+    proj_rgba = sample_rgba_to_projected_grid(src_rgba, src_extent, grid_E, grid_N, utm_to_wgs)
+
+    fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI)
+
+    ax.imshow(
+        proj_rgba,
+        extent=(e_min, e_max, n_min, n_max),
+        origin="upper",
+        interpolation="nearest"
+    )
+
+    if cyprus_wgs is not None:
+        cyprus_utm = cyprus_wgs.to_crs("EPSG:32636")
         try:
-            ftp_upload_file(out_png)
-            ftp_upload_file(out_latest)
-            ftp_prune_timestamped(prefix=prefix, latest_name=latest_name, keep=int(region_cfg["remote_keep"]))
-        except Exception as e:
-            print(f"⚠️ FTP upload/prune failed for {region_key} cloud: {e}")
-
-    elif kind == "rain":
-        prefix = region_cfg["rain_prefix"]
-        latest_name = region_cfg["rain_latest"]
-        out_png = os.path.join(OUTPUT_DIR, f"{prefix}{ts}.png")
-        out_latest = os.path.join(OUTPUT_DIR, latest_name)
-
-        rain_img, rain_meta = fetch_rain_mosaic(extent, zoom=RAIN_ZOOM, tile_size=RAIN_TILE_SIZE)
-        left_text = (
-            f"Δημιουργήθηκε για το e-kairos.gr\n"
-            f"{timestamp_text}\n"
-            f"Πηγή: RainViewer radar mosaic"
-        )
-        right_text = (
-            f"Frame UTC: {fmt_athens_from_unix(rain_meta.get('time'))}\n"
-            f"API generated: {fmt_athens_from_unix(rain_meta.get('generated'))}"
-        )
-        title = f"Υπολογ. τελευταία διαθέσιμη βροχή {region_cfg['name']}"
-
-        save_map(rain_img, boundary_gdf, extent, title, left_text, right_text, out_png)
-        shutil.copy(out_png, out_latest)
-        print(f"✅ Saved: {out_latest}")
-
-        try:
-            ftp_upload_file(out_png)
-            ftp_upload_file(out_latest)
-            ftp_prune_timestamped(prefix=prefix, latest_name=latest_name, keep=int(region_cfg["remote_keep"]))
-        except Exception as e:
-            print(f"⚠️ FTP upload/prune failed for {region_key} rain: {e}")
-
+            boundary_utm = cyprus_utm.geometry.union_all()
+        except AttributeError:
+            boundary_utm = unary_union(cyprus_utm.geometry)
+        plot_boundary_proj(ax, boundary_utm, linewidth=0.5, color="black")
     else:
-        raise ValueError(f"Unknown product kind: {kind}")
+        print("⚠️ cyprus.geojson not found. Cyprus maps will be plotted without coastline overlay.")
+
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlim(e_min, e_max)
+    ax.set_ylim(n_min, n_max)
+
+    lon0 = (lon_min + lon_max) / 2.0
+    lat0 = (lat_min + lat_max) / 2.0
+    lon_step = 0.5
+    lat_step = 0.5
+
+    lon_ticks = np.arange(np.floor(lon_min / lon_step) * lon_step, lon_max + 1e-9, lon_step)
+    lat_ticks = np.arange(np.floor(lat_min / lat_step) * lat_step, lat_max + 1e-9, lat_step)
+
+    x_ticks_m, _ = to_utm.transform(lon_ticks, np.full_like(lon_ticks, lat0))
+    _, y_ticks_m = to_utm.transform(np.full_like(lat_ticks, lon0), lat_ticks)
+
+    ax.xaxis.set_major_locator(FixedLocator(x_ticks_m))
+    ax.yaxis.set_major_locator(FixedLocator(y_ticks_m))
+    ax.set_xticklabels(["%.2f" % lon for lon in lon_ticks])
+    ax.set_yticklabels(["%.2f" % lat for lat in lat_ticks])
+
+    ax.set_title("Υπολογ. τελευταία διαθέσιμη %s %s" % (product_label, region_name), fontsize=14, pad=10, loc="center")
+    ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
+    ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
+    ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
+
+    ax.grid(True, linewidth=0.3, alpha=0.4)
+
+    ax.text(
+        0.01, 0.01, footer_left,
+        transform=ax.transAxes,
+        fontsize=8,
+        color="black",
+        ha="left",
+        va="bottom",
+        bbox=transparent_bbox(pad=0.3, rounded=True)
+    )
+    ax.text(
+        0.99, 0.01, footer_right,
+        transform=ax.transAxes,
+        fontsize=8,
+        color="black",
+        ha="right",
+        va="bottom",
+        bbox=transparent_bbox(pad=0.3, rounded=True)
+    )
+
+    reserve_right_legend_space(ax)
+    plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
+    plt.savefig(out_png, dpi=DPI, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
 
 
+# =============================================================================
+# PRODUCT RUNNERS
+# =============================================================================
+def build_and_save_cloud(region_key, cfg, output_dir, now_athens, greece_wgs, greece_egsa, cyprus_wgs):
+    lon_min, lon_max, lat_min, lat_max = cfg["bbox"]
+
+    src_rgba, src_extent = fetch_cloud_wms_rgba(lon_min, lon_max, lat_min, lat_max)
+
+    ts = now_athens.strftime("%Y-%m-%d-%H-%M")
+    out_png = os.path.join(output_dir, cfg["cloud_prefix"] + ts + ".png")
+    out_latest = os.path.join(output_dir, cfg["cloud_latest"])
+
+    footer_left = "Δημιουργήθηκε για το e-kairos.gr\n%s %s\nΠηγή: EUMETView WMS" % (
+        fmt_generated(now_athens),
+        athens_abbrev(now_athens)
+    )
+    footer_right = "Layer: %s" % CLOUD_WMS_LAYER
+
+    if cfg["mode"] == "greece_wgs84":
+        plot_greece_wgs84("νέφωση", cfg["name"], cfg["bbox"], src_rgba, src_extent, greece_wgs, footer_right, footer_left, out_png)
+    elif cfg["mode"] == "egsa_region":
+        plot_egsa_region("νέφωση", cfg["name"], cfg["bbox"], src_rgba, src_extent, greece_egsa, footer_right, footer_left, out_png)
+    elif cfg["mode"] == "cyprus_utm":
+        plot_cyprus_utm("νέφωση", cfg["name"], cfg["bbox"], src_rgba, src_extent, cyprus_wgs, footer_right, footer_left, out_png)
+    else:
+        raise RuntimeError("Unknown mode for cloud: %s" % cfg["mode"])
+
+    shutil.copy(out_png, out_latest)
+    print("✅ Saved:", out_png)
+    print("✅ Saved:", out_latest)
+
+    return [out_png, out_latest], (cfg["cloud_prefix"], cfg["cloud_latest"], int(cfg.get("remote_keep", 200)))
+
+
+def build_and_save_rain(region_key, cfg, output_dir, now_athens, greece_wgs, greece_egsa, cyprus_wgs):
+    lon_min, lon_max, lat_min, lat_max = cfg["bbox"]
+
+    src_rgba, src_extent, meta = fetch_rainviewer_rgba_for_bbox(lon_min, lon_max, lat_min, lat_max, z=RAIN_ZOOM, tile_size=RAIN_TILE_SIZE)
+
+    frame_time = meta.get("frame_time")
+    api_generated = meta.get("api_generated")
+
+    frame_time_str = "unknown"
+    api_gen_str = "unknown"
+    if frame_time is not None:
+        try:
+            dt_frame = datetime.fromtimestamp(int(frame_time), tz=ZoneInfo("UTC")).astimezone(ATHENS_TZ)
+            frame_time_str = dt_frame.strftime("%Y-%m-%d %H:%M") + " " + athens_abbrev(dt_frame)
+        except Exception:
+            pass
+    if api_generated is not None:
+        try:
+            dt_gen = datetime.fromtimestamp(int(api_generated), tz=ZoneInfo("UTC")).astimezone(ATHENS_TZ)
+            api_gen_str = dt_gen.strftime("%Y-%m-%d %H:%M") + " " + athens_abbrev(dt_gen)
+        except Exception:
+            pass
+
+    ts = now_athens.strftime("%Y-%m-%d-%H-%M")
+    out_png = os.path.join(output_dir, cfg["rain_prefix"] + ts + ".png")
+    out_latest = os.path.join(output_dir, cfg["rain_latest"])
+
+    footer_left = "Δημιουργήθηκε για το e-kairos.gr\n%s %s\nΠηγή: RainViewer radar mosaic" % (
+        fmt_generated(now_athens),
+        athens_abbrev(now_athens)
+    )
+    footer_right = "Frame: %s\nAPI generated: %s" % (frame_time_str, api_gen_str)
+
+    if cfg["mode"] == "greece_wgs84":
+        plot_greece_wgs84("βροχή", cfg["name"], cfg["bbox"], src_rgba, src_extent, greece_wgs, footer_right, footer_left, out_png)
+    elif cfg["mode"] == "egsa_region":
+        plot_egsa_region("βροχή", cfg["name"], cfg["bbox"], src_rgba, src_extent, greece_egsa, footer_right, footer_left, out_png)
+    elif cfg["mode"] == "cyprus_utm":
+        plot_cyprus_utm("βροχή", cfg["name"], cfg["bbox"], src_rgba, src_extent, cyprus_wgs, footer_right, footer_left, out_png)
+    else:
+        raise RuntimeError("Unknown mode for rain: %s" % cfg["mode"])
+
+    shutil.copy(out_png, out_latest)
+    print("✅ Saved:", out_png)
+    print("✅ Saved:", out_latest)
+
+    return [out_png, out_latest], (cfg["rain_prefix"], cfg["rain_latest"], int(cfg.get("remote_keep", 200)))
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
 def main():
-    ensure_greece_geojson()
-    greece_gdf = load_boundary_geojson(GREECE_GEOJSON_PATH)
-    cyprus_gdf = load_boundary_geojson(CYPRUS_GEOJSON_PATH)
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--region",
+        default="all",
+        choices=["all", "greece", "attica", "crete", "negreece", "swgreece", "cyprus"],
+        help="Which region to run."
+    )
+    args = parser.parse_args()
 
-    for region_key, cfg in REGIONS.items():
+    output_dir = os.path.join(BASE_DIR, "testmaps")
+    os.makedirs(output_dir, exist_ok=True)
+
+    now_athens = datetime.now(ATHENS_TZ)
+
+    # Load boundaries once
+    greece_wgs = load_greece_wgs84()
+    greece_egsa = greece_wgs.to_crs("EPSG:2100")
+    cyprus_wgs = load_cyprus_wgs84_or_none()
+
+    selected = []
+    if args.region == "all":
+        selected = ["greece", "attica", "crete", "negreece", "swgreece", "cyprus"]
+    else:
+        selected = [args.region]
+
+    upload_files = []
+    prune_specs = []
+
+    for rk in selected:
+        cfg = REGIONS[rk]
+
         print("\n====================")
-        print(f"RUN: {cfg['name']}")
+        print("RUN:", cfg["name"])
         print("====================")
 
-        if cfg["boundary"] == "greece":
-            boundary = greece_gdf
-        elif cfg["boundary"] == "cyprus":
-            boundary = cyprus_gdf
-            if boundary is None:
-                print("⚠️ cyprus.geojson not found. Cyprus maps will be plotted without coastline overlay.")
-        else:
-            boundary = None
+        try:
+            files, prune = build_and_save_cloud(rk, cfg, output_dir, now_athens, greece_wgs, greece_egsa, cyprus_wgs)
+            upload_files.extend(files)
+            prune_specs.append(prune)
+        except Exception as e:
+            print("❌ Cloud generation failed for %s: %s" % (cfg["name"], e))
 
-        render_one_product("cloud", region_key, cfg, boundary)
-        render_one_product("rain", region_key, cfg, boundary)
+        try:
+            files, prune = build_and_save_rain(rk, cfg, output_dir, now_athens, greece_wgs, greece_egsa, cyprus_wgs)
+            upload_files.extend(files)
+            prune_specs.append(prune)
+        except Exception as e:
+            print("❌ Rain generation failed for %s: %s" % (cfg["name"], e))
+
+    # de-duplicate prune specs
+    seen = set()
+    prune_specs_unique = []
+    for item in prune_specs:
+        key = (item[0], item[1], item[2])
+        if key not in seen:
+            seen.add(key)
+            prune_specs_unique.append(item)
+
+    # Upload and prune once
+    ftp_upload_many_and_prune(upload_files, prune_specs_unique)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"❌ {type(e).__name__}: {e}")
-        raise
+    main()
