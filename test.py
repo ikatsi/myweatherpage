@@ -592,7 +592,7 @@ def plot_greece_wgs84(product_label, region_name, bbox, src_rgba, src_extent, bo
     ax.set_xlim(lon_min, lon_max)
     ax.set_ylim(lat_min, lat_max)
 
-    ax.set_title("Υπολογ. τελευταία διαθέσιμη %s %s" % (product_label, region_name), fontsize=14, pad=10, loc="center")
+    ax.set_title(product_label, fontsize=14, pad=10, loc="center")
     ax.set_xlabel("Γεωγρ. μήκος", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
@@ -681,7 +681,7 @@ def plot_egsa_region(product_label, region_name, bbox, src_rgba, src_extent, gre
     ax.xaxis.set_major_formatter(FuncFormatter(fmt_lon))
     ax.yaxis.set_major_formatter(FuncFormatter(fmt_lat))
 
-    ax.set_title("Υπολογ. τελευταία διαθέσιμη %s %s" % (product_label, region_name), fontsize=14, pad=10, loc="center")
+    ax.set_title(product_label, fontsize=14, pad=10, loc="center")
     ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
@@ -771,7 +771,7 @@ def plot_cyprus_utm(product_label, region_name, bbox, src_rgba, src_extent, cypr
     ax.set_xticklabels(["%.2f" % lon for lon in lon_ticks])
     ax.set_yticklabels(["%.2f" % lat for lat in lat_ticks])
 
-    ax.set_title("Υπολογ. τελευταία διαθέσιμη %s %s" % (product_label, region_name), fontsize=14, pad=10, loc="center")
+    ax.set_title(product_label, fontsize=14, pad=10, loc="center")
     ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
@@ -822,11 +822,11 @@ def build_and_save_cloud(region_key, cfg, output_dir, now_athens, greece_wgs, gr
     footer_right = "Layer: %s" % CLOUD_WMS_LAYER
 
     if cfg["mode"] == "greece_wgs84":
-        plot_greece_wgs84("νέφωση", cfg["name"], cfg["bbox"], src_rgba, src_extent, greece_wgs, footer_right, footer_left, out_png)
+        plot_greece_wgs84("Υπολογ. τελευταία διαθέσιμη νεφοκάλυψη", cfg["name"], cfg["bbox"], src_rgba, src_extent, greece_wgs, footer_right, footer_left, out_png)
     elif cfg["mode"] == "egsa_region":
-        plot_egsa_region("νέφωση", cfg["name"], cfg["bbox"], src_rgba, src_extent, greece_egsa, footer_right, footer_left, out_png)
+        plot_egsa_region("Υπολογ. τελευταία διαθέσιμη νεφοκάλυψη", cfg["name"], cfg["bbox"], src_rgba, src_extent, greece_egsa, footer_right, footer_left, out_png)
     elif cfg["mode"] == "cyprus_utm":
-        plot_cyprus_utm("νέφωση", cfg["name"], cfg["bbox"], src_rgba, src_extent, cyprus_wgs, footer_right, footer_left, out_png)
+        plot_cyprus_utm("Υπολογ. τελευταία διαθέσιμη νεφοκάλυψη", cfg["name"], cfg["bbox"], src_rgba, src_extent, cyprus_wgs, footer_right, footer_left, out_png)
     else:
         raise RuntimeError("Unknown mode for cloud: %s" % cfg["mode"])
 
@@ -871,11 +871,11 @@ def build_and_save_rain(region_key, cfg, output_dir, now_athens, greece_wgs, gre
     footer_right = "Frame: %s\nAPI generated: %s" % (frame_time_str, api_gen_str)
 
     if cfg["mode"] == "greece_wgs84":
-        plot_greece_wgs84("βροχή", cfg["name"], cfg["bbox"], src_rgba, src_extent, greece_wgs, footer_right, footer_left, out_png)
+        plot_greece_wgs84("Υπολογ. τελευταία διαθέσιμη εκτίμηση υετού", cfg["name"], cfg["bbox"], src_rgba, src_extent, greece_wgs, footer_right, footer_left, out_png)
     elif cfg["mode"] == "egsa_region":
-        plot_egsa_region("βροχή", cfg["name"], cfg["bbox"], src_rgba, src_extent, greece_egsa, footer_right, footer_left, out_png)
+        plot_egsa_region("Υπολογ. τελευταία διαθέσιμη εκτίμηση υετού", cfg["name"], cfg["bbox"], src_rgba, src_extent, greece_egsa, footer_right, footer_left, out_png)
     elif cfg["mode"] == "cyprus_utm":
-        plot_cyprus_utm("βροχή", cfg["name"], cfg["bbox"], src_rgba, src_extent, cyprus_wgs, footer_right, footer_left, out_png)
+        plot_cyprus_utm("Υπολογ. τελευταία διαθέσιμη εκτίμηση υετού", cfg["name"], cfg["bbox"], src_rgba, src_extent, cyprus_wgs, footer_right, footer_left, out_png)
     else:
         raise RuntimeError("Unknown mode for rain: %s" % cfg["mode"])
 
