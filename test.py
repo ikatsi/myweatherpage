@@ -205,8 +205,6 @@ def reserve_right_legend_space(fig, ax):
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="3%", pad=0.1)
 
-    # Use a real colorbar object so matplotlib preserves the exact column,
-    # but make it visually blank.
     bg = fig.get_facecolor()
     blank_cmap = ListedColormap([bg, bg])
     sm = ScalarMappable(norm=Normalize(vmin=0.0, vmax=1.0), cmap=blank_cmap)
@@ -610,7 +608,7 @@ def plot_greece_wgs84(product_label, region_name, bbox, src_rgba, src_extent, bo
     ax.set_xlim(lon_min, lon_max)
     ax.set_ylim(lat_min, lat_max)
 
-    ax.set_title(product_label, fontsize=14, pad=10, loc="center")
+    ax.set_title(product_label, fontsize=14, pad=4, loc="center")
     ax.set_xlabel("Γεωγρ. μήκος", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
@@ -638,7 +636,7 @@ def plot_greece_wgs84(product_label, region_name, bbox, src_rgba, src_extent, bo
 
     spacer_ax = reserve_right_legend_space(fig, ax)
 
-    plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
+    plt.subplots_adjust(top=0.98, bottom=0.08, left=0.08, right=0.92)
     plt.savefig(out_png, dpi=DPI, bbox_inches="tight", bbox_extra_artists=[spacer_ax], pad_inches=0)
     plt.close(fig)
 
@@ -700,7 +698,7 @@ def plot_egsa_region(product_label, region_name, bbox, src_rgba, src_extent, gre
     ax.xaxis.set_major_formatter(FuncFormatter(fmt_lon))
     ax.yaxis.set_major_formatter(FuncFormatter(fmt_lat))
 
-    ax.set_title(product_label, fontsize=14, pad=10, loc="center")
+    ax.set_title(product_label, fontsize=14, pad=4, loc="center")
     ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
@@ -728,7 +726,7 @@ def plot_egsa_region(product_label, region_name, bbox, src_rgba, src_extent, gre
 
     spacer_ax = reserve_right_legend_space(fig, ax)
 
-    plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
+    plt.subplots_adjust(top=0.98, bottom=0.08, left=0.08, right=0.92)
     plt.savefig(out_png, dpi=DPI, bbox_inches="tight", bbox_extra_artists=[spacer_ax], pad_inches=0)
     plt.close(fig)
 
@@ -791,7 +789,7 @@ def plot_cyprus_utm(product_label, region_name, bbox, src_rgba, src_extent, cypr
     ax.set_xticklabels(["%.2f" % lon for lon in lon_ticks])
     ax.set_yticklabels(["%.2f" % lat for lat in lat_ticks])
 
-    ax.set_title(product_label, fontsize=14, pad=10, loc="center")
+    ax.set_title(product_label, fontsize=14, pad=4, loc="center")
     ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
@@ -819,7 +817,7 @@ def plot_cyprus_utm(product_label, region_name, bbox, src_rgba, src_extent, cypr
 
     spacer_ax = reserve_right_legend_space(fig, ax)
 
-    plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
+    plt.subplots_adjust(top=0.98, bottom=0.08, left=0.08, right=0.92)
     plt.savefig(out_png, dpi=DPI, bbox_inches="tight", bbox_extra_artists=[spacer_ax], pad_inches=0)
     plt.close(fig)
 
