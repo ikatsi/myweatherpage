@@ -1,0 +1,30 @@
+{
+  "run_generated_athens": "2026-03-28 13:06 EET",
+  "bbox": {
+    "lon_min": 19.0,
+    "lat_min": 34.5,
+    "lon_max": 30.0,
+    "lat_max": 42.5
+  },
+  "cloud": {
+    "source": "EUMETView WMS",
+    "wms_url": "https://view.eumetsat.int/geoserver/wms",
+    "layer": "msg_fes:clm",
+    "time_used": null,
+    "response_date_header": "Sat, 28 Mar 2026 11:06:46 GMT",
+    "output": "docs/testmaps/cloudiness_latest.png"
+  },
+  "rain": {
+    "source": "RainViewer Weather Maps API",
+    "api_url": "https://api.rainviewer.com/public/weather-maps.json",
+    "frame_path": "/v2/radar/4166a49ec275",
+    "frame_time_utc_unix": 1774695600,
+    "api_generated_utc_unix": 1774695926,
+    "zoom": 6,
+    "tile_size": 512,
+    "color_scheme": 2,
+    "smooth": 1,
+    "snow": 1,
+    "output": "docs/testmaps/rain_latest.png"
+  }
+}
