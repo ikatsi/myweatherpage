@@ -303,7 +303,17 @@ def ftp_upload_many_and_prune(upload_files, prune_specs):
 def reserve_right_legend_space(ax):
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="3%", pad=0.1)
-    cax.set_axis_off()
+
+    # Keep the axis "present" so bbox_inches='tight' does not crop it away
+    cax.set_xticks([])
+    cax.set_yticks([])
+    cax.set_facecolor((1, 1, 1, 0.0))
+    for spine in cax.spines.values():
+        spine.set_visible(False)
+
+    # Add an invisible artist so the axis counts in the tight bbox
+    cax.text(0.5, 0.5, " ", ha="center", va="center", alpha=0.0)
+
     return cax
 
 
@@ -618,9 +628,9 @@ def plot_greece_wgs84(product_label, region_name, bbox, src_rgba, src_extent, bo
         bbox=transparent_bbox(pad=0.3, rounded=True)
     )
 
-    reserve_right_legend_space(ax)
+    spacer_ax = reserve_right_legend_space(ax)
     plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
-    plt.savefig(out_png, dpi=DPI, bbox_inches="tight", pad_inches=0)
+    plt.savefig(out_png, dpi=DPI, bbox_inches="tight", bbox_extra_artists=[spacer_ax], pad_inches=0)
     plt.close(fig)
 
 
@@ -707,9 +717,9 @@ def plot_egsa_region(product_label, region_name, bbox, src_rgba, src_extent, gre
         bbox=transparent_bbox(pad=0.3, rounded=True)
     )
 
-    reserve_right_legend_space(ax)
+    spacer_ax = reserve_right_legend_space(ax)
     plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
-    plt.savefig(out_png, dpi=DPI, bbox_inches="tight", pad_inches=0)
+    plt.savefig(out_png, dpi=DPI, bbox_inches="tight", bbox_extra_artists=[spacer_ax], pad_inches=0)
     plt.close(fig)
 
 
@@ -797,9 +807,9 @@ def plot_cyprus_utm(product_label, region_name, bbox, src_rgba, src_extent, cypr
         bbox=transparent_bbox(pad=0.3, rounded=True)
     )
 
-    reserve_right_legend_space(ax)
+    spacer_ax = reserve_right_legend_space(ax)
     plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
-    plt.savefig(out_png, dpi=DPI, bbox_inches="tight", pad_inches=0)
+    plt.savefig(out_png, dpi=DPI, bbox_inches="tight", bbox_extra_artists=[spacer_ax], pad_inches=0)
     plt.close(fig)
 
 
