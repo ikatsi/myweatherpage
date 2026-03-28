@@ -1,0 +1,67 @@
+name: Test cloud and rain maps
+
+on:
+  workflow_dispatch:
+    inputs:
+      cloud_wms_layer:
+        description: "EUMETView WMS cloud layer"
+        required: false
+        default: "msg_fes:clm"
+      rain_zoom:
+        description: "RainViewer tile zoom (5-7 is sensible)"
+        required: false
+        default: "6"
+
+permissions:
+  contents: write
+
+jobs:
+  build-test-maps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install requests numpy matplotlib pillow geopandas shapely pyproj
+
+      - name: Ensure output folder exists
+        run: mkdir -p docs/testmaps
+
+      - name: Run test.py
+        env:
+          GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
+          CLOUD_WMS_LAYER: ${{ github.event.inputs.cloud_wms_layer }}
+          RAIN_ZOOM: ${{ github.event.inputs.rain_zoom }}
+        run: python test.py
+
+      - name: Upload output artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-maps
+          path: |
+            docs/testmaps/cloudiness_latest.png
+            docs/testmaps/rain_latest.png
+            docs/testmaps/metadata.json
+          if-no-files-found: error
+
+      - name: Commit updated outputs to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/testmaps/
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Update test cloud/rain maps"
+            git push
+          fi
