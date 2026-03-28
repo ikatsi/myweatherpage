@@ -2,65 +2,98 @@ name: Test cloud and rain maps
 
 on:
   workflow_dispatch:
-    inputs:
-      cloud_wms_layer:
-        description: "Cloud WMS layer (e.g. msg_fes:ir108 or msg_fes:clm)"
-        required: false
-        default: "msg_fes:ir108"
-      rain_zoom:
-        description: "RainViewer zoom level (0-10)"
-        required: false
-        default: "7"
+
+concurrency:
+  group: test-maps-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  build-test-maps:
+  run:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
-    permissions:
-      contents: read
+    env:
+      MPLBACKEND: Agg
+      GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
+      FTP_HOST:     ${{ secrets.FTP_HOST }}
+      FTP_USER:     ${{ secrets.FTP_USER }}
+      FTP_PASS:     ${{ secrets.FTP_PASS }}
+      CLOUD_WMS_LAYER: ${{ secrets.CLOUD_WMS_LAYER }}
+      RAIN_ZOOM: "7"
 
     steps:
-      - name: Check out repository
+      - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Sanity check encrypted assets exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -lh \
+            greece.geojson.enc \
+            cyprus.geojson.enc
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install system packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gdal-bin libgdal-dev
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-testmaps-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-testmaps-
 
-      - name: Install Python packages
+      - name: Install Python deps
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          pip install \
-            numpy \
-            pandas \
-            matplotlib \
-            requests \
-            pillow \
-            pyproj \
-            geopandas \
-            shapely \
-            rasterio \
-            fiona
+          pip install --only-binary=:all: \
+            numpy matplotlib requests pillow \
+            shapely pyproj fiona geopandas pyogrio
+
+      - name: Decrypt Greece GeoJSON
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
+          test -f greece.geojson.enc || { echo "greece.geojson.enc missing"; exit 1; }
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in greece.geojson.enc \
+            -out greece.geojson \
+            -pass pass:"${GEOJSON_PASS}"
+          ls -lh greece.geojson
+
+      - name: Decrypt Cyprus GeoJSON
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
+          test -f cyprus.geojson.enc || { echo "cyprus.geojson.enc missing"; exit 1; }
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in cyprus.geojson.enc \
+            -out cyprus.geojson \
+            -pass pass:"${GEOJSON_PASS}"
+          ls -lh cyprus.geojson
 
       - name: Run test.py
-        env:
-          GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
-          FTP_HOST: ${{ secrets.FTP_HOST }}
-          FTP_USER: ${{ secrets.FTP_USER }}
-          FTP_PASS: ${{ secrets.FTP_PASS }}
-          CLOUD_WMS_LAYER: ${{ github.event.inputs.cloud_wms_layer }}
-          RAIN_ZOOM: ${{ github.event.inputs.rain_zoom }}
-        run: python test.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -V
+          python test.py --region all
 
-      - name: Upload generated maps as artifact
+      - name: Upload PNG artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: testmaps
           path: testmaps/*.png
           if-no-files-found: warn
+          retention-days: 7
