@@ -50,6 +50,8 @@ import matplotlib.pyplot as plt
 
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.ticker import FuncFormatter, MaxNLocator, FixedLocator
+from matplotlib.colors import Normalize, ListedColormap
+from matplotlib.cm import ScalarMappable
 
 import geopandas as gpd
 from shapely.geometry import box, Polygon, MultiPolygon
@@ -199,21 +201,27 @@ def transparent_bbox(pad=0.3, rounded=True):
         boxstyle=boxstyle,
     )
 
-def reserve_right_legend_space(ax):
+def reserve_right_legend_space(fig, ax):
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="3%", pad=0.1)
 
+    # Use a real colorbar object so matplotlib preserves the exact column,
+    # but make it visually blank.
+    bg = fig.get_facecolor()
+    blank_cmap = ListedColormap([bg, bg])
+    sm = ScalarMappable(norm=Normalize(vmin=0.0, vmax=1.0), cmap=blank_cmap)
+    sm.set_array([0.0, 1.0])
+
+    cbar = fig.colorbar(sm, cax=cax)
+    cbar.set_ticks([])
+    cbar.outline.set_visible(False)
+
+    cax.set_facecolor(bg)
     cax.set_xticks([])
     cax.set_yticks([])
-    cax.set_facecolor((1, 1, 1, 0.0))
     for spine in cax.spines.values():
         spine.set_visible(False)
     cax.set_frame_on(False)
-
-    # Keep a real artist on the axis so bbox_inches='tight' preserves the space
-    cax.plot([0, 1], [0, 1], alpha=0.0)
-    cax.set_xlim(0, 1)
-    cax.set_ylim(0, 1)
 
     return cax
 
@@ -628,7 +636,7 @@ def plot_greece_wgs84(product_label, region_name, bbox, src_rgba, src_extent, bo
         bbox=transparent_bbox(pad=0.3, rounded=True)
     )
 
-    spacer_ax = reserve_right_legend_space(ax)
+    spacer_ax = reserve_right_legend_space(fig, ax)
 
     plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
     plt.savefig(out_png, dpi=DPI, bbox_inches="tight", bbox_extra_artists=[spacer_ax], pad_inches=0)
@@ -718,7 +726,7 @@ def plot_egsa_region(product_label, region_name, bbox, src_rgba, src_extent, gre
         bbox=transparent_bbox(pad=0.3, rounded=True)
     )
 
-    spacer_ax = reserve_right_legend_space(ax)
+    spacer_ax = reserve_right_legend_space(fig, ax)
 
     plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
     plt.savefig(out_png, dpi=DPI, bbox_inches="tight", bbox_extra_artists=[spacer_ax], pad_inches=0)
@@ -809,7 +817,7 @@ def plot_cyprus_utm(product_label, region_name, bbox, src_rgba, src_extent, cypr
         bbox=transparent_bbox(pad=0.3, rounded=True)
     )
 
-    spacer_ax = reserve_right_legend_space(ax)
+    spacer_ax = reserve_right_legend_space(fig, ax)
 
     plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
     plt.savefig(out_png, dpi=DPI, bbox_inches="tight", bbox_extra_artists=[spacer_ax], pad_inches=0)
