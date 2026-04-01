@@ -70,8 +70,23 @@ from pyproj import Transformer
 # CONFIG
 # =========================
 EXCLUDE_TMAX_WEBCODES = {"hua_ilion", "hua_argyroupoli", "age_leventochori", "age_vrana", "age_leptokarya"}
-EXCLUDE_PPN_WEBCODES = {"pws2_chalkida", "age_vrana", "potamoi", "age_leptokarya"}
-EXCLUDE_ALL_WEBCODES = {"pws_gebze"}
+EXCLUDE_PPN_WEBCODES = {
+    "pws2_chalkida",
+    "age_vrana",
+    "potamoi",
+    "age_leptokarya",
+    "hnms3_megara",
+    "iaasars_mandraektropi",
+    "ntua_zografou",
+    "wu_afidnes",
+    "wu_sykamino",
+    "hnms3_prokopi",
+    "wl_velestino",
+    "wu_lefki",
+    "hcmr_georganades",
+    "hcmr_raxa",
+    "age_kissavos"
+}EXCLUDE_ALL_WEBCODES = {"pws_gebze"}
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__) or ".")
 
