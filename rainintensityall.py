@@ -76,6 +76,20 @@ CURRENTWEATHER_URL = os.environ.get("CURRENTWEATHER_URL", "").strip()
 if not CURRENTWEATHER_URL:
     raise SystemExit("❌ CURRENTWEATHER_URL secret/env not set.")
 
+EXCLUDE_RAININTENSITY_WEBCODES = {
+    "hnms3_megara",
+    "iaasars_mandraektropi",
+    "ntua_zografou",
+    "wu_afidnes",
+    "wu_sykamino",
+    "hnms3_prokopi",
+    "wl_velestino",
+    "wu_lefki",
+    "hcmr_georganades",
+    "hcmr_raxa",
+    "age_kissavos"
+}
+
 # Optional FTP
 FTP_HOST = os.environ.get("FTP_HOST", "").strip()
 FTP_USER = os.environ.get("FTP_USER", "").strip()
@@ -118,7 +132,27 @@ def fmt_data_until(dtval) -> str:
         except Exception:
             return "—"
 
+def prepare_rainintensity_data(df: pd.DataFrame) -> pd.DataFrame:
+    rr = df.copy()
 
+    if "webcode" in rr.columns:
+        rr["webcode_norm"] = (
+            rr["webcode"].astype(str)
+            .str.replace("\ufeff", "", regex=False)
+            .str.replace("ï»¿", "", regex=False)
+            .str.strip()
+            .str.lower()
+        )
+
+        exclude = {w.strip().lower() for w in EXCLUDE_RAININTENSITY_WEBCODES}
+        present = sorted(set(rr.loc[rr["webcode_norm"].isin(exclude), "webcode_norm"].unique()))
+        if present:
+            print("🌧️ Excluding from RainIntensity:", present)
+
+        rr = rr[~rr["webcode_norm"].isin(exclude)].copy()
+
+    return rr
+  
 def athens_abbrev(dt: datetime) -> str:
     """
     Returns EET or EEST for Athens time, reliably.
@@ -1014,10 +1048,18 @@ def run_greece():
     data_until_str = fmt_data_until(data_until)
 
 
-    lats = df["Latitude"].values.astype(float)
-    lons = df["Longitude"].values.astype(float)
-    intens = df["RainIntensity"].values.astype(float)
+    rain_df = prepare_rainintensity_data(df)
+    if rain_df.empty:
+        print("⚠️ No rain-intensity stations left after exclusions.")
+        return
+    lats = rain_df["Latitude"].values.astype(float)
+    lons = rain_df["Longitude"].values.astype(float)
+    intens = rain_df["RainIntensity"].values.astype(float)
+    
+    # keep temperature from full df so snowline/lapse still uses all valid stations
     tnow = df["TNow"].values.astype(float)
+    temp_lats = df["Latitude"].values.astype(float)
+    temp_lons = df["Longitude"].values.astype(float)
 
     # grid in degrees
     grid_x, grid_y = np.meshgrid(
@@ -1061,14 +1103,14 @@ def run_greece():
     masked_intensity[final_mask] = grid_intensity[final_mask]
 
     # local regression temperature grid
-    station_alt = sample_altitude_vrt_m(ALT_VRT_PATH, lons, lats)
+    station_alt = sample_altitude_vrt_m(ALT_VRT_PATH, temp_lons, temp_lats)
     grid_tnow, grid_b, grid_a, b_global = build_temperature_grid_local_lr_wgs(
-        GRID_LON_MIN, GRID_LON_MAX, GRID_LAT_MIN, GRID_LAT_MAX,
-        grid_x, grid_y,
-        lons, lats,
-        tnow, station_alt,
-        ALT_VRT_PATH,
-        grid_n=GRID_N
+      GRID_LON_MIN, GRID_LON_MAX, GRID_LAT_MIN, GRID_LAT_MAX,
+      grid_x, grid_y,
+      temp_lons, temp_lats,
+      tnow, station_alt,
+      ALT_VRT_PATH,
+      grid_n=GRID_N
     )
 
     snow_mask = (
@@ -1292,15 +1334,30 @@ def run_egsa_region(cfg: dict):
         return
 
     # station arrays
-    lats = df["Latitude"].values.astype(float)
-    lons = df["Longitude"].values.astype(float)
-    intens = df["RainIntensity"].values.astype(float)
-    tnow = df["TNow"].values.astype(float)
+    rain_df = prepare_rainintensity_data(df)
 
-    # project stations to EGSA
+    if rain_df.empty:
+      print("⚠️ No rain-intensity stations left after exclusions.")
+      return
+
+    lats = rain_df["Latitude"].values.astype(float)
+    lons = rain_df["Longitude"].values.astype(float)
+    intens = rain_df["RainIntensity"].values.astype(float)
+    
+    # keep temperature inputs from full df
+    temp_lats = df["Latitude"].values.astype(float)
+    temp_lons = df["Longitude"].values.astype(float)
+    tnow = df["TNow"].values.astype(float)
+    
+    # project rain stations to EGSA
     st_x, st_y = wgs_to_egsa.transform(lons.tolist(), lats.tolist())
     st_x = np.asarray(st_x, dtype=float)
     st_y = np.asarray(st_y, dtype=float)
+    
+    # project temp stations separately
+    temp_x, temp_y = wgs_to_egsa.transform(temp_lons.tolist(), temp_lats.tolist())
+    temp_x = np.asarray(temp_x, dtype=float)
+    temp_y = np.asarray(temp_y, dtype=float)
 
     # grid in EGSA meters
     grid_x_m, grid_y_m = np.meshgrid(
@@ -1355,10 +1412,10 @@ def run_egsa_region(cfg: dict):
     masked_intensity[final_mask] = grid_intensity[final_mask]
 
     # temperature local regression
-    station_alt = sample_altitude_vrt_m(ALT_VRT_PATH, lons, lats)
+    station_alt = sample_altitude_vrt_m(ALT_VRT_PATH, temp_lons, temp_lats)
     grid_tnow, grid_b, grid_a, b_global = build_temperature_grid_local_lr_projected(
         grid_x_m, grid_y_m,
-        st_x, st_y,
+        temp_x, temp_y,
         tnow, station_alt,
         egsa_to_wgs,
         ALT_VRT_PATH,
@@ -1687,11 +1744,19 @@ def run_cyprus():
 
     # stations in UTM
     to_utm = Transformer.from_crs(CRS_WGS84, CRS_UTM, always_xy=True)
-    lons = df["Longitude"].values.astype(float)
-    lats = df["Latitude"].values.astype(float)
+    
+    rain_df = prepare_rainintensity_data(df)
+    if rain_df.empty:
+        print("⚠️ No rain-intensity stations left after exclusions.")
+        return
+    lons = rain_df["Longitude"].values.astype(float)
+    lats = rain_df["Latitude"].values.astype(float)
     easts, norths = to_utm.transform(lons, lats)
-
-    intens = df["RainIntensity"].values.astype(float)
+    intens = rain_df["RainIntensity"].values.astype(float)
+    
+    temp_lons = df["Longitude"].values.astype(float)
+    temp_lats = df["Latitude"].values.astype(float)
+    temp_easts, temp_norths = to_utm.transform(temp_lons, temp_lats)
     tnow = df["TNow"].values.astype(float)
 
     # grid over bbox corners
@@ -1731,7 +1796,7 @@ def run_cyprus():
     masked_intensity[final_mask] = grid_intensity[final_mask]
 
     # altitude + lapse (Cyprus uses global lapse only, per your script)
-    station_alt = sample_altitude_raster_m(CYPRUS_ALT_TIF_PATH, lons, lats, input_crs=CRS_WGS84)
+    station_alt = sample_altitude_raster_m(CYPRUS_ALT_TIF_PATH, temp_lons, temp_lats, input_crs=CRS_WGS84)
     lapse = fit_global_lapse_rate(tnow, station_alt)
 
     ok_t = np.isfinite(tnow) & np.isfinite(station_alt)
@@ -1739,13 +1804,12 @@ def run_cyprus():
     t0[ok_t] = tnow[ok_t] - lapse * station_alt[ok_t]
 
     grid_t0 = idw_any_neighbor(
-        easts, norths, t0,
+        temp_easts, temp_norths, t0,
         grid_E, grid_N,
         power=IDW_POWER,
         max_distance=MAX_DISTANCE_M,
         k=IDW_K
     )
-
     grid_alt = sample_altitude_raster_m(
         CYPRUS_ALT_TIF_PATH,
         grid_E.ravel(), grid_N.ravel(),
