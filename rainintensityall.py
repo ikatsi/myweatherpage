@@ -76,6 +76,8 @@ CURRENTWEATHER_URL = os.environ.get("CURRENTWEATHER_URL", "").strip()
 if not CURRENTWEATHER_URL:
     raise SystemExit("❌ CURRENTWEATHER_URL secret/env not set.")
 
+BRAND_NAME = os.environ.get("BRAND_NAME", "").strip()
+
 EXCLUDE_RAININTENSITY_WEBCODES = {
     "hnms3_megara",
     "iaasars_mandraektropi",
@@ -1208,7 +1210,7 @@ def run_greece():
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
     timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M") + f" {athens_abbrev(athens_now)}"
-    left_text = f"Δημιουργήθηκε για το e-kairos.gr\n{timestamp_text}\nμε δεδομένα έως και {data_until_str}"
+    left_text = f"Δημιουργήθηκε για το {BRAND_NAME}\n{timestamp_text}\nμε δεδομένα έως και {data_until_str}"
     right_text = f"v4.0-local\nΧιονόπτωση ≤ {SNOW_T_C:.1f}°C\nΣυνολ. βαροβαθμιδα: {b_global*1000:.2f} °C/km"
 
     ax.text(
@@ -1563,7 +1565,7 @@ def run_egsa_region(cfg: dict):
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
     timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M") + f" {athens_abbrev(athens_now)}"
-    left_text = f"Δημιουργήθηκε για το e-kairos.gr\n{timestamp_text}\nμε δεδομένα έως και {fmt_data_until(df['Datetime'].max())}"
+    left_text = f"Δημιουργήθηκε για το {BRAND_NAME}\n{timestamp_text}\nμε δεδομένα έως και {fmt_data_until(df['Datetime'].max())}"
     right_text = f"{cfg.get('footer_version','v4.x-egsa2100')}\nΧιονόπτωση ≤ {SNOW_T_C:.1f}°C\nΣυνολ. βαροβαθμιδα: {b_global*1000:.2f} °C/km"
 
     ax.text(
@@ -1952,7 +1954,7 @@ def run_cyprus():
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
     timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M") + f" {athens_abbrev(athens_now)}"
-    left_text = f"Δημιουργήθηκε για το e-kairos.gr\n{timestamp_text}\nμε δεδομένα έως και {data_until_str}"
+    left_text = f"Δημιουργήθηκε για το {BRAND_NAME}\n{timestamp_text}\nμε δεδομένα έως και {data_until_str}"
     
     ax.text(
         0.01, 0.01, left_text,
