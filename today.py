@@ -86,7 +86,8 @@ EXCLUDE_PPN_WEBCODES = {
     "hcmr_georganades",
     "hcmr_raxa",
     "age_kissavos"
-}EXCLUDE_ALL_WEBCODES = {"pws_gebze"}
+}
+EXCLUDE_ALL_WEBCODES = {"pws_gebze"}
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__) or ".")
 
@@ -815,20 +816,38 @@ def prepare_today_data(data: pd.DataFrame, athens_now: datetime) -> pd.DataFrame
             .str.lower()
         )
 
-        exclude_ppn = {w.strip().lower() for w in EXCLUDE_PPN_WEBCODES}
         exclude_all = {w.strip().lower() for w in EXCLUDE_ALL_WEBCODES}
 
         mask = (
             ~wc.str.match(r"(?i)^wu_lefkaditi$", na=False) &
             ~wc.str.match(r"(?i)^age_klimamilou$", na=False) &
             ~wc.str.match(r"(?i)^uoi_", na=False) &
-            ~wc.isin(exclude_ppn) &
             ~wc.isin(exclude_all)
         )
         today_data = today_data[mask].copy()
 
     return today_data
 
+def prepare_rain_data(today_data: pd.DataFrame) -> pd.DataFrame:
+    rr = today_data.copy()
+
+    if "webcode" in rr.columns:
+        rr["webcode_norm"] = (
+            rr["webcode"].astype(str)
+            .str.replace("\ufeff", "", regex=False)
+            .str.replace("ï»¿", "", regex=False)
+            .str.strip()
+            .str.lower()
+        )
+
+        exclude_ppn = {w.strip().lower() for w in EXCLUDE_PPN_WEBCODES}
+        present = sorted(set(rr.loc[rr["webcode_norm"].isin(exclude_ppn), "webcode_norm"].unique()))
+        if present:
+            print("🌧️ Excluding from TodayRain:", present)
+
+        rr = rr[~rr["webcode_norm"].isin(exclude_ppn)].copy()
+
+    return rr
 
 def prepare_tmax_data(today_data: pd.DataFrame) -> pd.DataFrame:
     tt0 = today_data.copy()
@@ -1395,9 +1414,10 @@ def main():
 
     
     # -------- Rain --------
+    rain_input = prepare_rain_data(today_data)
     rain_dir = os.path.join(BASE_DIR, "TodayRainMaps")
     rain_main, _ = make_todayrain_map_national(
-        today_data, greece, grid_x, grid_y, geo_mask, rain_dir, athens_now
+        rain_input, greece, grid_x, grid_y, geo_mask, rain_dir, athens_now
     )
 
     # -------- Tmin --------
