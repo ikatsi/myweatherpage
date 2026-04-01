@@ -1201,7 +1201,7 @@ def run_greece():
     try:
         ftp_upload_file(out_png)
         ftp_upload_file(out_latest)
-        ftp_prune_timestamped(prefix=prefix, latest_name=latest_name, keep=200)
+        ftp_prune_timestamped(prefix=prefix, latest_name=latest_name, keep=216)
     except Exception as e:
         print(f"⚠️ FTP upload/prune failed: {e}")
 
@@ -1541,7 +1541,7 @@ def run_egsa_region(cfg: dict):
     try:
         ftp_upload_file(out_png)
         ftp_upload_file(out_latest)
-        ftp_prune_timestamped(prefix=prefix, latest_name=latest_name, keep=int(cfg.get("remote_keep", 200)))
+        ftp_prune_timestamped(prefix=prefix, latest_name=latest_name, keep=int(cfg.get("remote_keep", 216)))
     except Exception as e:
         print(f"⚠️ FTP upload/prune failed: {e}")
 
@@ -1938,7 +1938,7 @@ EGSA_REGIONS = {
         "bbox": (22.7, 25.0, 37.5, 38.7),
         "prefix": "rain_intensity_attica_",
         "latest_name": "latestattica.png",
-        "remote_keep": 200,
+        "remote_keep": 216,
         "time_window_min": 45,
         "grid_n": 300,
         "idw": {
@@ -1967,7 +1967,7 @@ EGSA_REGIONS = {
         "bbox": (23.37, 26.4, 34.7, 35.78),
         "prefix": "rain_intensity_crete_",
         "latest_name": "latestcrete.png",
-        "remote_keep": 200,
+        "remote_keep": 216,
         "time_window_min": 45,
         "grid_n": 300,
         "idw": {
@@ -1996,7 +1996,7 @@ EGSA_REGIONS = {
         "bbox": (22.0, 26.6, 39.7, 41.8),
         "prefix": "rain_intensity_negreece_",
         "latest_name": "latestnegreece.png",
-        "remote_keep": 200,
+        "remote_keep": 216,
         "time_window_min": 45,
         "grid_n": 300,
         "idw": {
@@ -2026,7 +2026,7 @@ EGSA_REGIONS = {
         "bbox": (20.0, 24.0, 36.0, 39.0),
         "prefix": "rain_intensity_swgreece_",
         "latest_name": "latestswgreece.png",
-        "remote_keep": 200,
+        "remote_keep": 216,
         "time_window_min": 45,
         "grid_n": 300,
         "idw": {
