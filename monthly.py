@@ -5,6 +5,7 @@ import os
 import io
 import zipfile
 import subprocess
+import json
 from io import StringIO
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -132,6 +133,107 @@ REGIONS = [
     },
 ]
 
+# ======================
+# SHARED EXCLUSION RULES
+# ======================
+RAW_EXCLUSION_RULES = os.environ.get("STATION_EXCLUSION_RULES", "").strip()
+
+def load_exclusion_rules():
+    if not RAW_EXCLUSION_RULES:
+        return {
+            "version": None,
+            "propagation": {
+                "rain_implies_precip": True,
+                "today_precip_implies_rain": True
+            },
+            "hard_excludes": {
+                "temperature": [],
+                "precip": [],
+                "rain": []
+            },
+            "date_rules": []
+        }
+
+    try:
+        rules = json.loads(RAW_EXCLUSION_RULES)
+    except Exception as e:
+        raise RuntimeError("Failed to parse STATION_EXCLUSION_RULES JSON: {}".format(e))
+
+    if not isinstance(rules, dict):
+        raise RuntimeError("STATION_EXCLUSION_RULES must decode to a JSON object.")
+
+    rules.setdefault("propagation", {})
+    rules.setdefault("hard_excludes", {})
+    rules.setdefault("date_rules", [])
+
+    for fam in ("temperature", "precip", "rain"):
+        rules["hard_excludes"].setdefault(fam, [])
+
+    return rules
+
+
+EXCLUSION_RULES = load_exclusion_rules()
+
+
+def _norm_webcode(x):
+    if x is None:
+        return ""
+    return str(x).strip().casefold()
+
+
+def _norm_family(x):
+    return str(x).strip().casefold()
+
+
+def _parse_rule_date(x):
+    if x in (None, "", "null"):
+        return None
+    return pd.to_datetime(x, errors="coerce").date()
+
+
+def is_excluded_for_family(webcode, family, on_date, rules=None):
+    if rules is None:
+        rules = EXCLUSION_RULES
+
+    wc = _norm_webcode(webcode)
+    fam = _norm_family(family)
+
+    if not wc:
+        return False
+
+    hard = {_norm_webcode(x) for x in rules.get("hard_excludes", {}).get(fam, [])}
+    if wc in hard:
+        return True
+
+    for rule in rules.get("date_rules", []):
+        if _norm_webcode(rule.get("webcode")) != wc:
+            continue
+        if _norm_family(rule.get("family")) != fam:
+            continue
+
+        start = _parse_rule_date(rule.get("start"))
+        end = _parse_rule_date(rule.get("end"))
+
+        if start is not None and on_date < start:
+            continue
+        if end is not None and on_date > end:
+            continue
+
+        return True
+
+    return False
+
+
+def apply_family_exclusions(df, family, on_date, rules=None):
+    if rules is None:
+        rules = EXCLUSION_RULES
+
+    if "webcode" not in df.columns:
+        return df.copy()
+
+    out = df.copy()
+    mask = out["webcode"].apply(lambda w: is_excluded_for_family(w, family, on_date, rules))
+    return out.loc[~mask].copy()
 
 # ======================
 # HELPERS
@@ -616,24 +718,11 @@ data = pd.read_csv(StringIO(response.text), delimiter="\t")
 athens_now = datetime.now(ZoneInfo("Europe/Athens"))
 today_day = athens_now.day
 
-w = data["webcode"].astype("string").str.strip().str.casefold()
-
-excluded_exact = {
-    "agrivate_stavroupoli", "age_dasosxiromerou",
-    "agrivate_rizia", "age_agiosilias", "wu_lefkaditi", "wu_lampeia",
-    "wu_karkalou", "hnms3_megara", "wu_varnavas", "wu_sykamino",
-    "wu_avlonas", "age_galatas", "ierapetra", "agrivate_messouni",
-    "pws_proti2", "age_vrana", "potamoi", "age_leptokarya"
-}
-excluded_prefixes = ("hcmr_", "uoi_")
-
 if "daysinmonth" not in data.columns:
     raise ValueError("Column 'daysinmonth' is missing from monthly source data.")
 
 data = data[
-    (pd.to_numeric(data["daysinmonth"], errors="coerce") == today_day)
-    & (~w.isin(excluded_exact))
-    & (~w.str.startswith(excluded_prefixes, na=False))
+    pd.to_numeric(data["daysinmonth"], errors="coerce") == today_day
 ].copy()
 
 data["latitude"] = pd.to_numeric(data["latitude"], errors="coerce")
@@ -654,9 +743,13 @@ else:
 
 data = data.dropna(subset=["latitude", "longitude"]).copy()
 
-if data.empty:
-    raise ValueError("❌ Δεν υπάρχουν δεδομένα μετά το φιλτράρισμα.")
+today_date = athens_now.date()
 
+data_precip = apply_family_exclusions(data, "precip", today_date, EXCLUSION_RULES)
+data_temp = apply_family_exclusions(data, "temperature", today_date, EXCLUSION_RULES)
+
+if data_precip.empty and data_temp.empty:
+    raise ValueError("❌ Δεν υπάρχουν δεδομένα μετά το φιλτράρισμα και τους αποκλεισμούς.")
 
 # ======================
 # LOAD GREECE GEOMETRY ONCE
@@ -1305,27 +1398,28 @@ def main():
 
     # 1) National precipitation
     reg = REGIONS[0]
-    region_df = bbox_filter(data, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
-    buf = build_precip_map_buffer(region_df, reg, timestamp_text)
+    region_df_precip = bbox_filter(data_precip, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+    buf = build_precip_map_buffer(region_df_precip, reg, timestamp_text)
     if buf is not None:
         outputs.append(("precip", reg["outfile"], buf))
 
     # 2) National tavg
-    buf = build_monthly_tavg_greece_buffer(region_df, reg, greece, athens_now, timestamp_text)
+    region_df_temp = bbox_filter(data_temp, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+    buf = build_monthly_tavg_greece_buffer(region_df_temp, reg, greece, athens_now, timestamp_text)
     if buf is not None:
         outputs.append(("temp", reg["temp_outfile"], buf))
 
     # 3) Regional precipitation
     for reg in REGIONS[1:]:
-        region_df = bbox_filter(data, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
-        buf = build_precip_region_egsa_buffer(region_df, reg, timestamp_text)
+        region_df_precip = bbox_filter(data_precip, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+        buf = build_precip_region_egsa_buffer(region_df_precip, reg, timestamp_text)
         if buf is not None:
             outputs.append(("precip", reg["outfile"], buf))
 
     # 4) Regional temperature
     for reg in REGIONS[1:]:
-        region_df = bbox_filter(data, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
-        buf = build_monthly_tavg_region_egsa_buffer(region_df, reg, greece, athens_now, timestamp_text)
+        region_df_temp = bbox_filter(data_temp, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+        buf = build_monthly_tavg_region_egsa_buffer(region_df_temp, reg, greece, athens_now, timestamp_text)
         if buf is not None:
             outputs.append(("temp", reg["temp_outfile"], buf))
 
