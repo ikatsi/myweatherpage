@@ -151,9 +151,13 @@ def load_exclusion_rules():
                 "precip": [],
                 "rain": []
             },
+            "hard_exclude_prefixes": {
+                "temperature": [],
+                "precip": [],
+                "rain": []
+            },
             "date_rules": []
         }
-
     try:
         rules = json.loads(RAW_EXCLUSION_RULES)
     except Exception as e:
@@ -164,10 +168,12 @@ def load_exclusion_rules():
 
     rules.setdefault("propagation", {})
     rules.setdefault("hard_excludes", {})
+    rules.setdefault("hard_exclude_prefixes", {})
     rules.setdefault("date_rules", [])
 
     for fam in ("temperature", "precip", "rain"):
         rules["hard_excludes"].setdefault(fam, [])
+        rules["hard_exclude_prefixes"].setdefault(fam, [])
 
     return rules
 
@@ -204,6 +210,15 @@ def is_excluded_for_family(webcode, family, on_date, rules=None):
     hard = {_norm_webcode(x) for x in rules.get("hard_excludes", {}).get(fam, [])}
     if wc in hard:
         return True
+
+    prefixes = [
+        str(x).strip().casefold()
+        for x in rules.get("hard_exclude_prefixes", {}).get(fam, [])
+        if str(x).strip()
+    ]
+    for pref in prefixes:
+        if wc.startswith(pref):
+            return True
 
     for rule in rules.get("date_rules", []):
         if _norm_webcode(rule.get("webcode")) != wc:
