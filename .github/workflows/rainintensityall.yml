@@ -24,6 +24,7 @@ jobs:
       FTP_USER:           ${{ secrets.FTP_USER }}
       FTP_PASS:           ${{ secrets.FTP_PASS }}
       BRAND_NAME:         ${{ secrets.BRAND_NAME }}
+      STATION_EXCLUSION_RULES: ${{ secrets.STATION_EXCLUSION_RULES }}
 
     steps:
       - name: Checkout
