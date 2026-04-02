@@ -537,6 +537,14 @@ def add_temp_contours(ax, X, Y, field):
         except Exception:
             pass
 
+def topbox_source_df(region_df, reg):
+    df = region_df.copy()
+
+    if reg.get("key") == "attica" and "region" in df.columns:
+        r = df["region"].astype("string").str.strip().str.casefold()
+        df = df[r == "attica"].copy()
+
+    return df
 
 # ======================
 # SHARED TEMP PALETTE
@@ -716,7 +724,8 @@ def build_precip_map_buffer(region_df, reg, timestamp_text):
         return None
 
     top_n = int(reg.get("top_n", TOP_N))
-    top_text = build_top_text(region_df, top_n)
+    top_df = topbox_source_df(region_df, reg)
+    top_text = build_top_text(top_df, top_n)
 
     grid_x, grid_y = np.meshgrid(
         np.linspace(lon_min, lon_max, GRID_N),
@@ -812,7 +821,8 @@ def build_precip_region_egsa_buffer(region_df, reg, timestamp_text):
         return None
 
     top_n = int(reg.get("top_n", TOP_N))
-    top_text = build_top_text(region_df, top_n)
+    top_df = topbox_source_df(region_df, reg)
+    top_text = build_top_text(top_df, top_n)
 
     x_min, x_max, y_min, y_max = projected_bbox_from_wgs_bbox(
         lon_min, lon_max, lat_min, lat_max, n=200
@@ -1059,7 +1069,8 @@ def build_monthly_tavg_greece_buffer(region_df, reg, greece_gdf_wgs, athens_now,
         tx.set_path_effects([pe.withStroke(linewidth=3.0, foreground="white")])
 
     top_n = int(reg.get("top_n", TOP_N))
-    top_text = build_temp_top_text(region_df, top_n)
+    top_df = topbox_source_df(region_df, reg)
+    top_text = build_temp_top_text(top_df, top_n)
 
     if top_text.strip():
         top_loc = reg.get("top_loc", "top_right")
@@ -1253,7 +1264,8 @@ def build_monthly_tavg_region_egsa_buffer(region_df, reg, greece_gdf_wgs, athens
         tx.set_path_effects([pe.withStroke(linewidth=3.0, foreground="white")])
 
     top_n = int(reg.get("top_n", TOP_N))
-    top_text = build_temp_top_text(region_df, top_n)
+    top_df = topbox_source_df(region_df, reg)
+    top_text = build_temp_top_text(top_df, top_n)
 
     if top_text.strip():
         top_loc = reg.get("top_loc", "top_right")
