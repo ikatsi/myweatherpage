@@ -5,6 +5,7 @@ import os
 import io
 import zipfile
 import subprocess
+import json
 from io import StringIO
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -147,6 +148,123 @@ REGIONS = [
         "temp_mode": "egsa"
     },
 ]
+
+# ======================
+# SHARED EXCLUSION RULES
+# ======================
+RAW_EXCLUSION_RULES = os.environ.get("STATION_EXCLUSION_RULES", "").strip()
+
+def load_exclusion_rules():
+    if not RAW_EXCLUSION_RULES:
+        return {
+            "version": None,
+            "propagation": {
+                "rain_implies_precip": True,
+                "today_precip_implies_rain": True
+            },
+            "hard_excludes": {
+                "temperature": [],
+                "precip": [],
+                "rain": []
+            },
+            "hard_exclude_prefixes": {
+                "temperature": [],
+                "precip": [],
+                "rain": []
+            },
+            "date_rules": []
+        }
+    try:
+        rules = json.loads(RAW_EXCLUSION_RULES)
+    except Exception as e:
+        raise RuntimeError("Failed to parse STATION_EXCLUSION_RULES JSON: {}".format(e))
+
+    if not isinstance(rules, dict):
+        raise RuntimeError("STATION_EXCLUSION_RULES must decode to a JSON object.")
+
+    rules.setdefault("propagation", {})
+    rules.setdefault("hard_excludes", {})
+    rules.setdefault("hard_exclude_prefixes", {})
+    rules.setdefault("date_rules", [])
+
+    for fam in ("temperature", "precip", "rain"):
+        rules["hard_excludes"].setdefault(fam, [])
+        rules["hard_exclude_prefixes"].setdefault(fam, [])
+
+    return rules
+
+
+EXCLUSION_RULES = load_exclusion_rules()
+
+
+def _norm_webcode(x):
+    if x is None:
+        return ""
+    return str(x).strip().casefold()
+
+
+def _norm_family(x):
+    return str(x).strip().casefold()
+
+
+def _parse_rule_date(x):
+    if x in (None, "", "null"):
+        return None
+    return pd.to_datetime(x, errors="coerce").date()
+
+
+def is_excluded_for_family(webcode, family, on_date, rules=None):
+    if rules is None:
+        rules = EXCLUSION_RULES
+
+    wc = _norm_webcode(webcode)
+    fam = _norm_family(family)
+
+    if not wc:
+        return False
+
+    hard = {_norm_webcode(x) for x in rules.get("hard_excludes", {}).get(fam, [])}
+    if wc in hard:
+        return True
+
+    prefixes = [
+        str(x).strip().casefold()
+        for x in rules.get("hard_exclude_prefixes", {}).get(fam, [])
+        if str(x).strip()
+    ]
+    for pref in prefixes:
+        if wc.startswith(pref):
+            return True
+
+    for rule in rules.get("date_rules", []):
+        if _norm_webcode(rule.get("webcode")) != wc:
+            continue
+        if _norm_family(rule.get("family")) != fam:
+            continue
+
+        start = _parse_rule_date(rule.get("start"))
+        end = _parse_rule_date(rule.get("end"))
+
+        if start is not None and on_date < start:
+            continue
+        if end is not None and on_date > end:
+            continue
+
+        return True
+
+    return False
+
+
+def apply_family_exclusions(df, family, on_date, rules=None):
+    if rules is None:
+        rules = EXCLUSION_RULES
+
+    if "webcode" not in df.columns:
+        return df.copy()
+
+    out = df.copy()
+    mask = out["webcode"].apply(lambda w: is_excluded_for_family(w, family, on_date, rules))
+    return out.loc[~mask].copy()
 
 
 # ======================
@@ -495,6 +613,14 @@ def estimate_local_lapse_rates_egsa(st_x, st_y, st_temp, st_elev,
 
     return lapses
 
+def topbox_source_df(region_df, reg):
+    df = region_df.copy()
+
+    if reg.get("key") == "attica" and "region" in df.columns:
+        r = df["region"].astype("string").str.strip().str.casefold()
+        df = df[r == "attica"].copy()
+
+    return df
 
 def add_temp_contours(ax, X, Y, field):
     levels = np.arange(-30, 46, 3, dtype=float)
@@ -661,7 +787,6 @@ if "webcode" not in raw_data.columns:
     raise RuntimeError("Input data has no 'webcode' column.")
 
 raw_data["webcode"] = raw_data["webcode"].astype("string")
-w = raw_data["webcode"].str.strip().str.casefold()
 
 # Numeric columns
 for col in [
@@ -674,56 +799,24 @@ for col in [
     if col in raw_data.columns:
         raw_data[col] = pd.to_numeric(raw_data[col], errors="coerce")
 
-# -------- Existing yearly/calendar filter logic --------
-excluded_exact_year = {
-    "agrivate_stavroupoli", "age_dasosxiromerou",
-    "agrivate_rizia", "age_agiosilias",
-    "hnms3_megara", "wu_varnavas", "wu_sykamino", "wu_avlonas",
-    "age_galatas", "agrivate_messouni", "voutsaras", "pws_proti2", "age_vrana", "potamoi", "age_leptokarya"
-}
-excluded_prefixes_year = ("hcmr", "uoi_")
-
+# -------- Shared-rule-driven yearly / hydro filtering --------
 if "daysinyear" in raw_data.columns:
-    data_year = raw_data[
-        (raw_data["daysinyear"] == today_yday)
-        & (~w.isin(excluded_exact_year))
-        & (~w.str.startswith(excluded_prefixes_year, na=False))
+    base_year = raw_data[
+        raw_data["daysinyear"] == today_yday
     ].copy()
 else:
-    data_year = raw_data[
-        (~w.isin(excluded_exact_year))
-        & (~w.str.startswith(excluded_prefixes_year, na=False))
-    ].copy()
+    base_year = raw_data.copy()
 
-data_year = data_year.dropna(subset=["latitude", "longitude"]).copy()
+base_year = base_year.dropna(subset=["latitude", "longitude"]).copy()
 
-# -------- Hydro filter logic --------
-excluded_exact_hydro = {
-    "agrivate_stavroupoli", "age_dasosxiromerou",
-    "agrivate_rizia", "age_agiosilias", "metaxochori",
-    "hnms3_megara", "wu_varnavas", "wu_sykamino", "wu_avlonas",
-    "age_galatas", "agrivate_messouni", "voutsaras",
-    "ierapetra", "age_vrana", "potamoi"
-}
-excluded_prefixes_hydro = ("hcmr", "uoi_")
+today_date = athens_now.date()
 
-if "daysinyear" in raw_data.columns:
-    data_hydro = raw_data[
-        (raw_data["daysinyear"] == today_yday)
-        & (~w.isin(excluded_exact_hydro))
-        & (~w.str.startswith(excluded_prefixes_hydro, na=False))
-    ].copy()
-else:
-    data_hydro = raw_data[
-        (~w.isin(excluded_exact_hydro))
-        & (~w.str.startswith(excluded_prefixes_hydro, na=False))
-    ].copy()
+data_year_precip = apply_family_exclusions(base_year, "precip", today_date, EXCLUSION_RULES)
+data_year_temp = apply_family_exclusions(base_year, "temperature", today_date, EXCLUSION_RULES)
+data_hydro_precip = apply_family_exclusions(base_year, "precip", today_date, EXCLUSION_RULES)
 
-data_hydro = data_hydro.dropna(subset=["latitude", "longitude"]).copy()
-
-if data_year.empty and data_hydro.empty:
-    raise ValueError("❌ Δεν υπάρχουν δεδομένα μετά το φιλτράρισμα.")
-
+if data_year_precip.empty and data_year_temp.empty and data_hydro_precip.empty:
+    raise ValueError("❌ Δεν υπάρχουν δεδομένα μετά το φιλτράρισμα και τους αποκλεισμούς.")
 
 # ======================
 # LOAD GREECE GEOMETRY ONCE
@@ -798,7 +891,8 @@ def build_precip_map_buffer_wgs(
         return None
 
     top_n = int(reg.get("top_n", TOP_N))
-    top_text = build_top_text(region_df, top_n, top_value_col)
+    top_df = topbox_source_df(region_df, reg)
+    top_text = build_top_text(top_df, top_n, top_value_col)
 
     grid_x, grid_y = np.meshgrid(
         np.linspace(lon_min, lon_max, GRID_N),
@@ -902,7 +996,8 @@ def build_precip_region_egsa_buffer(
         return None
 
     top_n = int(reg.get("top_n", TOP_N))
-    top_text = build_top_text(region_df, top_n, top_value_col)
+    top_df = topbox_source_df(region_df, reg)
+    top_text = build_top_text(top_df, top_n, top_value_col)
 
     x_min, x_max, y_min, y_max = projected_bbox_from_wgs_bbox(
         lon_min, lon_max, lat_min, lat_max, n=200
@@ -1150,7 +1245,8 @@ def build_yearly_tavg_greece_buffer(region_df, reg, greece_gdf_wgs, athens_now, 
         tx.set_path_effects([pe.withStroke(linewidth=3.0, foreground="white")])
 
     top_n = int(reg.get("top_n", TOP_N))
-    top_text = build_temp_top_text(region_df, top_n)
+    top_df = topbox_source_df(region_df, reg)
+    top_text = build_temp_top_text(top_df, top_n)
 
     if top_text.strip():
         top_loc = reg.get("top_loc", "top_right")
@@ -1343,7 +1439,8 @@ def build_yearly_tavg_region_egsa_buffer(region_df, reg, greece_gdf_wgs, athens_
         tx.set_path_effects([pe.withStroke(linewidth=3.0, foreground="white")])
 
     top_n = int(reg.get("top_n", TOP_N))
-    top_text = build_temp_top_text(region_df, top_n)
+    top_df = topbox_source_df(region_df, reg)
+    top_text = build_temp_top_text(top_df, top_n)
 
     if top_text.strip():
         top_loc = reg.get("top_loc", "top_right")
@@ -1385,9 +1482,9 @@ def main():
     # 1) National calendar-year precipitation (WGS84)
     # -------------------------------------------------
     reg = REGIONS[0]
-    region_df_year = bbox_filter(data_year, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+    region_df_year_precip = bbox_filter(data_year_precip, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
     buf = build_precip_map_buffer_wgs(
-        region_df=region_df_year,
+        region_df=region_df_year_precip,
         reg=reg,
         timestamp_text=timestamp_text,
         strict_value_col="total_precipitation",
@@ -1401,7 +1498,8 @@ def main():
     # -------------------------------------------------
     # 2) National yearly mean temperature (WGS84)
     # -------------------------------------------------
-    buf = build_yearly_tavg_greece_buffer(region_df_year, reg, greece, athens_now, timestamp_text)
+    region_df_year_temp = bbox_filter(data_year_temp, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+    buf = build_yearly_tavg_greece_buffer(region_df_year_temp, reg, greece, athens_now, timestamp_text)
     if buf is not None:
         outputs.append(("temp", reg["temp_outfile"], buf))
 
@@ -1409,9 +1507,9 @@ def main():
     # 3) Regional calendar-year precipitation (EGSA87)
     # -------------------------------------------------
     for reg in REGIONS[1:]:
-        region_df_year = bbox_filter(data_year, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+        region_df_year_precip = bbox_filter(data_year_precip, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
         buf = build_precip_region_egsa_buffer(
-            region_df=region_df_year,
+            region_df=region_df_year_precip,
             reg=reg,
             timestamp_text=timestamp_text,
             strict_value_col="total_precipitation",
@@ -1426,8 +1524,8 @@ def main():
     # 4) Regional yearly mean temperature (EGSA87)
     # -------------------------------------------------
     for reg in REGIONS[1:]:
-        region_df_year = bbox_filter(data_year, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
-        buf = build_yearly_tavg_region_egsa_buffer(region_df_year, reg, greece, athens_now, timestamp_text)
+        region_df_year_temp = bbox_filter(data_year_temp, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+        buf = build_yearly_tavg_region_egsa_buffer(region_df_year_temp, reg, greece, athens_now, timestamp_text)
         if buf is not None:
             outputs.append(("temp", reg["temp_outfile"], buf))
 
@@ -1435,7 +1533,7 @@ def main():
     # 5) National hydrological-year precipitation (WGS84)
     # -------------------------------------------------
     reg = REGIONS[0]
-    region_df_hydro = bbox_filter(data_hydro, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+    region_df_hydro = bbox_filter(data_hydro_precip, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
     buf = build_precip_map_buffer_wgs(
         region_df=region_df_hydro,
         reg=reg,
@@ -1452,7 +1550,7 @@ def main():
     # 6) Regional hydrological-year precipitation (EGSA87)
     # -------------------------------------------------
     for reg in REGIONS[1:]:
-        region_df_hydro = bbox_filter(data_hydro, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
+        region_df_hydro = bbox_filter(data_hydro_precip, reg["lon_min"], reg["lon_max"], reg["lat_min"], reg["lat_max"])
         buf = build_precip_region_egsa_buffer(
             region_df=region_df_hydro,
             reg=reg,
