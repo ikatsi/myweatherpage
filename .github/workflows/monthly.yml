@@ -22,6 +22,7 @@ jobs:
       FTP_USER: ${{ secrets.FTP_USER }}
       FTP_PASS: ${{ secrets.FTP_PASS }}
       GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
+      STATION_EXCLUSION_RULES: ${{ secrets.STATION_EXCLUSION_RULES }}
 
     steps:
       - name: Checkout
