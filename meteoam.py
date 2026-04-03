@@ -149,20 +149,12 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 # Rain-rate colormap
-PRECIP_CMAP = ListedColormap([
-    "#f7fbff",
-    "#deebf7",
-    "#9ecae1",
-    "#4292c6",
-    "#2171b5",
-    "#084594",
-    "#6a51a3",
-    "#ce1256",
-])
+PRECIP_CMAP = ListedColormap(["#deebf7", "#9ecae1", "#4292c6", "#08519c"])
 PRECIP_CMAP.set_under("#ffffff")
+PRECIP_CMAP.set_over("#08306b")
 PRECIP_CMAP.set_bad("#ffffff")
-PRECIP_BOUNDS = [0.1, 0.5, 1, 2, 5, 10, 20, 40, 100]
-PRECIP_NORM = BoundaryNorm(PRECIP_BOUNDS, PRECIP_CMAP.N)
+PRECIP_BOUNDS = [0.1, 2, 6, 36, 100]
+PRECIP_NORM = BoundaryNorm(boundaries=PRECIP_BOUNDS, ncolors=PRECIP_CMAP.N)
 
 # Phase colormap
 # 0 rain, 1 mixed, 2 snow
@@ -890,7 +882,7 @@ def save_phase_map(
 
     rr_for_contour = np.where(np.isfinite(rr2d) & (rr2d >= MIN_RR_TO_PLOT), rr2d, np.nan)
 
-    pcm = ax.pcolormesh(
+    ax.pcolormesh(
         lon2d, lat2d, phase_idx,
         cmap=PHASE_CMAP,
         norm=PHASE_NORM,
@@ -901,14 +893,17 @@ def save_phase_map(
     try:
         ax.contour(
             lon2d, lat2d, rr_for_contour,
-            levels=[0.1, 0.5, 1, 2, 5, 10, 20],
+            levels=[0.1, 2, 6, 36, 100],
             colors="black",
-            linewidths=0.6
+            linewidths=1
         )
     except Exception:
         pass
 
     draw_greece_outline(ax)
+    divider = make_axes_locatable(ax)
+    dummy_cax = divider.append_axes("right", size="3%", pad=0.1)
+    dummy_cax.axis("off")
 
     handles = [
         Patch(facecolor="#3182bd", edgecolor="black", label="Βροχή πιθανή"),
@@ -926,6 +921,7 @@ def save_phase_map(
 
     common_footer(ax, created_dt_ath, weather_until, h60_dt_utc, tw_global_lapse)
 
+    plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
     plt.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
     print(f"✅ Saved: {out_path}")
@@ -950,9 +946,9 @@ def save_rr_map(
     try:
         ax.contour(
             lon2d, lat2d, np.where(np.isfinite(rr2d) & (rr2d >= MIN_RR_TO_PLOT), rr2d, np.nan),
-            levels=[0.1, 0.5, 1, 2, 5, 10, 20],
+            levels=[0.1, 2, 6, 36, 100],
             colors="black",
-            linewidths=0.6
+            linewidths=1
         )
     except Exception:
         pass
@@ -961,18 +957,21 @@ def save_rr_map(
 
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="3%", pad=0.1)
-    cbar = plt.colorbar(img, cax=cax, boundaries=PRECIP_BOUNDS, extend="max")
-    cbar.set_label("H-SAF H60B precipitation rate (mm/h)", fontsize=11)
+    cbar = plt.colorbar(img, cax=cax, boundaries=PRECIP_BOUNDS, extend="both")
+    cbar.set_ticks([2, 6, 36, 100])
+    cbar.set_ticklabels(["2", "6", "36", "100"])
+    cbar.set_label("Ραγδαιότητα υετού (mm/h)", fontsize=12)
 
     ax.set_xlim(GRID_LON_MIN, GRID_LON_MAX)
     ax.set_ylim(GRID_LAT_MIN, GRID_LAT_MAX)
+    ax.set_title(title, fontsize=14, pad=10, loc="center")
     ax.set_xlabel("Γεωγρ. μήκος", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
-    ax.set_title(title, fontsize=14, pad=10)
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
     common_footer(ax, created_dt_ath, weather_until, h60_dt_utc, tw_global_lapse)
 
+    plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
     plt.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
     print(f"✅ Saved: {out_path}")
