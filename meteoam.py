@@ -630,8 +630,8 @@ def _build_lonlat_from_geos(ds):
     if lon_0 is None or h is None:
         raise RuntimeError("Missing longitude_of_projection_origin and/or perspective_point_height in H60 NetCDF.")
 
-    x_name = _find_var_name(ds, ["x", "xc"])
-    y_name = _find_var_name(ds, ["y", "yc"])
+    x_name = _find_var_name(ds, ["x", "xc", "nx"])
+    y_name = _find_var_name(ds, ["y", "yc", "ny"])
 
     # ------------------------------------------------------------------
     # Case 1: explicit x/y variables exist
@@ -685,42 +685,10 @@ def _build_lonlat_from_geos(ds):
             loff = getattr(ds, "loff", getattr(ds, "LOFF", None))
 
         if None in (cfac, lfac, coff, loff):
-            print("=== DEBUG H60 NAVIGATION ===")
-            print("variables:", list(ds.variables.keys()))
-            print("global attrs:", list(ds.ncattrs()))
-            for an in ds.ncattrs():
-                try:
-                    print(f"GLOBAL {an} = {getattr(ds, an)}")
-                except Exception:
-                    pass
-
-            print("projection variable:", geos_name)
-            try:
-                print("projection attrs:", gvar.ncattrs())
-                for an in gvar.ncattrs():
-                    try:
-                        print(f"GVAR {an} = {getattr(gvar, an)}")
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-            for vname in ds.variables.keys():
-                try:
-                    vv = ds.variables[vname]
-                    print(f"VAR {vname} dims={vv.dimensions} shape={vv.shape}")
-                    for an in vv.ncattrs():
-                        try:
-                            print(f"  {vname}.{an} = {getattr(vv, an)}")
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
             raise RuntimeError(
                 "Could not find x/y variables or CFAC/LFAC/COFF/LOFF navigation metadata in H60 NetCDF."
             )
-
+    
         cfac = float(cfac)
         lfac = float(lfac)
         coff = float(coff)
