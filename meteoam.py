@@ -70,6 +70,7 @@ from pyproj import Transformer, CRS
 import requests
 
 from netCDF4 import Dataset
+from PIL import Image
 
 
 # =============================================================================
@@ -145,6 +146,7 @@ MIN_RR_TO_PLOT = 0.1
 # Local output/cache dirs
 OUTPUT_DIR = os.path.join(BASE_DIR, "ptype_hsaf_greece")
 CACHE_DIR = os.path.join(BASE_DIR, "hsaf_cache")
+OVERLAY_TEMPLATE_PNG = os.path.join(BASE_DIR, "rainintensitymaps", "latest.png")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -212,6 +214,54 @@ def parse_h60_time_from_name(fname: str):
         return None
     d, hm = m.groups()
     return datetime.strptime(d + hm, "%Y%m%d%H%M").replace(tzinfo=UTC)
+
+def get_overlay_template_size():
+    if not os.path.exists(OVERLAY_TEMPLATE_PNG):
+        return None
+    try:
+        with Image.open(OVERLAY_TEMPLATE_PNG) as im:
+            return im.size
+    except Exception:
+        return None
+
+def normalize_png_canvas_to_latest(png_path: str):
+    """
+    Force exported PNG to the exact same pixel canvas as rainintensitymaps/latest.png,
+    without touching latest.png itself.
+    """
+    target_size = get_overlay_template_size()
+    if not target_size:
+        print("ℹ️ Overlay template latest.png not found. Skipping canvas normalization.")
+        return
+
+    target_w, target_h = target_size
+
+    with Image.open(png_path) as im:
+        src = im.copy()
+        src_w, src_h = src.size
+
+        if (src_w, src_h) == (target_w, target_h):
+            return
+
+        bg_color = src.getpixel((0, 0))
+        bg = Image.new(src.mode, (target_w, target_h), bg_color)
+
+        # If source is bigger, crop centrally
+        crop_left = max((src_w - target_w) // 2, 0)
+        crop_top = max((src_h - target_h) // 2, 0)
+        crop_right = crop_left + min(src_w, target_w)
+        crop_bottom = crop_top + min(src_h, target_h)
+
+        piece = src.crop((crop_left, crop_top, crop_right, crop_bottom))
+
+        # If source is smaller, paste centrally
+        paste_x = max((target_w - piece.size[0]) // 2, 0)
+        paste_y = max((target_h - piece.size[1]) // 2, 0)
+
+        bg.paste(piece, (paste_x, paste_y))
+        bg.save(png_path)
+
+    print(f"🧩 Normalized canvas to match latest.png: {png_path}")
 
 
 # =============================================================================
@@ -903,7 +953,11 @@ def save_phase_map(
     draw_greece_outline(ax)
     divider = make_axes_locatable(ax)
     dummy_cax = divider.append_axes("right", size="3%", pad=0.1)
-    dummy_cax.axis("off")
+    dummy_cax.set_xticks([])
+    dummy_cax.set_yticks([])
+    dummy_cax.set_facecolor(fig.get_facecolor())
+    for spine in dummy_cax.spines.values():
+        spine.set_visible(False)
 
     handles = [
         Patch(facecolor="#3182bd", edgecolor="black", label="Βροχή πιθανή"),
@@ -924,6 +978,7 @@ def save_phase_map(
     plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
     plt.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
+    normalize_png_canvas_to_latest(out_path)
     print(f"✅ Saved: {out_path}")
 
 def save_rr_map(
@@ -974,6 +1029,7 @@ def save_rr_map(
     plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
     plt.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
+    normalize_png_canvas_to_latest(out_path)
     print(f"✅ Saved: {out_path}")
 
 
