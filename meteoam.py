@@ -2,47 +2,48 @@
 # -*- coding: utf-8 -*-
 
 """
-ptype_hsaf_h68_greece.py
+meteoam.py
 
-New independent Greece-only product.
+Greece-wide precipitation-type maps using:
+- H-SAF H60B precipitation rate (external source)
+- station-based wet-bulb temperature from CURRENTWEATHER_URL + DEM
 
-What it does:
-- Downloads latest H-SAF H68 file from FTP
-- Reads external quantitative precipitation rate (rr, mm/h)
-- Reads your existing weathernow.txt feed from CURRENTWEATHER_URL
-- Computes station wet-bulb temperature from TNow + RHNow
-- Builds a Greece-wide wet-bulb grid using DEM-aware local lapse regression
-- Classifies precipitation phase using:
-    Tw <= 0.5°C          -> snow likely
-    0.5 < Tw <= 1.5°C    -> mixed / sleet-favoured
-    Tw > 1.5°C           -> rain likely
-- Produces Greece maps on the EXACT same bbox as your existing Greece script:
-    lon 19.0 to 30.0
-    lat 34.5 to 42.5
-- Uses EPSG:4326 like your existing Greece workflow
-- DOES NOT clip to Greece polygon features
-- Can optionally draw the Greece outline for reference
-- Can optionally upload outputs by FTPS using your existing FTP_* secrets
+Outputs are written locally to:
+    ./ptype_hsaf_greece/
+
+Remote FTP upload:
+- uploads PNG basenames only
+- no remote subfolders are created or used by this script
+
+Expected existing secrets/env:
+    CURRENTWEATHER_URL
+    GEOJSON_PASS
+    BRAND_NAME
+    FTP_HOST
+    FTP_USER
+    FTP_PASS
+    HSAF_HOST
+    HSAF_USER
+    HSAF_PASS
+    HSAF_REMOTE_DIR   -> should now be h60/h60_cur_mon_data
 """
 
 import os
 import re
 import io
-import sys
 import gzip
 import time
 import math
-import json
 import shutil
 import random
 import socket
 import zipfile
 import tempfile
 import subprocess
-from io import StringIO, BytesIO
+from io import StringIO
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from ftplib import FTP, FTP_TLS, error_perm
+from ftplib import FTP, FTP_TLS
 
 import numpy as np
 import pandas as pd
@@ -54,34 +55,21 @@ matplotlib.use("Agg")
 matplotlib.rcParams["font.family"] = "DejaVu Sans"
 matplotlib.rcParams["axes.unicode_minus"] = False
 import matplotlib.pyplot as plt
-import matplotlib.patheffects as pe
 
 from matplotlib.colors import ListedColormap, BoundaryNorm
+from matplotlib.patches import Patch
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from scipy.spatial import cKDTree
 from scipy.ndimage import zoom
-from scipy.interpolate import RegularGridInterpolator
+from scipy.interpolate import LinearNDInterpolator
 
 import rasterio
 from rasterio.warp import transform as rio_transform
 from pyproj import Transformer
 import requests
 
-# Try xarray first, then netCDF4 fallback
-XR_OK = False
-NC4_OK = False
-try:
-    import xarray as xr
-    XR_OK = True
-except Exception:
-    xr = None
-
-try:
-    from netCDF4 import Dataset
-    NC4_OK = True
-except Exception:
-    Dataset = None
+from netCDF4 import Dataset
 
 
 # =============================================================================
@@ -110,30 +98,33 @@ FTP_HOST = os.environ.get("FTP_HOST", "").strip()
 FTP_USER = os.environ.get("FTP_USER", "").strip()
 FTP_PASS = os.environ.get("FTP_PASS", "").strip()
 
-# New H-SAF secrets
+# H-SAF
 HSAF_HOST = os.environ.get("HSAF_HOST", "").strip() or "ftphsaf.meteoam.it"
 HSAF_USER = os.environ.get("HSAF_USER", "").strip()
 HSAF_PASS = os.environ.get("HSAF_PASS", "").strip()
-HSAF_REMOTE_DIR = os.environ.get("HSAF_REMOTE_DIR", "").strip() or "h68/h68_cur_mon_data"
+HSAF_REMOTE_DIR = os.environ.get("HSAF_REMOTE_DIR", "").strip() or "h60/h60_cur_mon_data"
 
 if not HSAF_USER or not HSAF_PASS:
     raise SystemExit("❌ HSAF_USER / HSAF_PASS not set.")
 
-# Same EXACT Greece bbox as your existing Greece runner
+# Same EXACT Greece bbox as your existing Greece script
 GRID_N = 300
 GRID_LON_MIN, GRID_LON_MAX = 19.0, 30.0
 GRID_LAT_MIN, GRID_LAT_MAX = 34.5, 42.5
 
-# Tw thresholds chosen by you
+# Greece outline is only for reference, not clipping
+SHOW_GREECE_OUTLINE = True
+
+# Wet-bulb thresholds chosen by you
 TW_SNOW_MAX = 0.5
 TW_MIXED_MAX = 1.5
 
 # Time windows
 WEATHER_TIME_WINDOW_MIN = 60
-HSAF_MAX_AGE_HOURS = 8
+HSAF_MAX_AGE_MIN = 120  # fail only if very stale
 
-# Wet-bulb local regression controls
-LAPSE_DEFAULT = -0.0055   # conservative default for Tw lapse (degC/m)
+# Tw lapse regression controls
+LAPSE_DEFAULT = -0.0055
 LAPSE_MIN = -0.0100
 LAPSE_MAX = -0.0010
 
@@ -144,19 +135,23 @@ ALT_RANGE_MIN_M = 400
 MIN_NBR = 8
 USE_DISTANCE_WEIGHTS = True
 
-# H-SAF file regex based on product manual + observed folder contents
-H68_FILE_RE = re.compile(r"^h68_\d{8}_\d{6}_\d{6}_hea\.nc\.gz$", re.IGNORECASE)
+# H60B filename pattern from PUM
+H60_FILE_RE = re.compile(r"^h60_\d{8}_\d{4}_fdk\.nc\.gz$", re.IGNORECASE)
 
-# Use H-SAF support filtering to avoid plotting unsupported pixels
-MIN_TOTALCOUNT = 1
-MIN_QIND = 0.0
+# H-SAF utility file for lon/lat
+HSAF_UTILITY_LATLON_REMOTE = "utilities/matlab_code/lat_lon_0.nc"
 
-# External precipitation visibility threshold
-MIN_RR_TO_PLOT = 0.05  # mm/h
+# Quality filtering
+MIN_QIND = 1.0
+MIN_RR_TO_PLOT = 0.1
 
-# Plotting
-SHOW_GREECE_OUTLINE = True
+# Local output/cache dirs
+OUTPUT_DIR = os.path.join(BASE_DIR, "ptype_hsaf_greece")
+CACHE_DIR = os.path.join(BASE_DIR, "hsaf_cache")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(CACHE_DIR, exist_ok=True)
 
+# Rain-rate colormap
 PRECIP_CMAP = ListedColormap([
     "#f7fbff",
     "#deebf7",
@@ -164,21 +159,22 @@ PRECIP_CMAP = ListedColormap([
     "#4292c6",
     "#2171b5",
     "#084594",
+    "#6a51a3",
+    "#ce1256",
 ])
 PRECIP_CMAP.set_under("#ffffff")
 PRECIP_CMAP.set_bad("#ffffff")
-PRECIP_BOUNDS = [0.1, 0.5, 1, 2, 5, 10, 25]
+PRECIP_BOUNDS = [0.1, 0.5, 1, 2, 5, 10, 20, 40, 100]
 PRECIP_NORM = BoundaryNorm(PRECIP_BOUNDS, PRECIP_CMAP.N)
 
+# Phase colormap
+# 0 rain, 1 mixed, 2 snow
 PHASE_CMAP = ListedColormap([
-    "#3182bd",  # rain likely
-    "#9e9ac8",  # mixed / sleet-favoured
-    "#f16913",  # snow likely
+    "#3182bd",
+    "#9e9ac8",
+    "#f16913",
 ])
 PHASE_NORM = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], PHASE_CMAP.N)
-
-OUTPUT_DIR = os.path.join(BASE_DIR, "ptype_hsaf_greece")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 # =============================================================================
@@ -221,17 +217,12 @@ def fmt_data_until(dtval) -> str:
         except Exception:
             return "—"
 
-def parse_h68_times_from_name(fname: str):
-    """
-    h68_20260403_080000_082959_hea.nc.gz
-    """
-    m = re.match(r"^h68_(\d{8})_(\d{6})_(\d{6})_hea\.nc\.gz$", os.path.basename(fname), re.IGNORECASE)
+def parse_h60_time_from_name(fname: str):
+    m = re.match(r"^h60_(\d{8})_(\d{4})_fdk\.nc\.gz$", os.path.basename(fname), re.IGNORECASE)
     if not m:
-        return None, None
-    d, s, f = m.groups()
-    start = datetime.strptime(d + s, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
-    end = datetime.strptime(d + f, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
-    return start, end
+        return None
+    d, hm = m.groups()
+    return datetime.strptime(d + hm, "%Y%m%d%H%M").replace(tzinfo=UTC)
 
 
 # =============================================================================
@@ -245,7 +236,7 @@ def _openssl_decrypt(enc_path: str, out_path: str, password: str):
             "-pass", "pass:" + password
         ])
     except FileNotFoundError:
-        raise SystemExit("❌ OpenSSL not found. Install it or decrypt in CI before running.")
+        raise SystemExit("❌ OpenSSL not found.")
     except subprocess.CalledProcessError as e:
         raise SystemExit(f"❌ OpenSSL decryption failed for {os.path.basename(enc_path)}: {e}")
 
@@ -357,17 +348,15 @@ def load_and_clean_weather_feed(text: str) -> pd.DataFrame:
     df = df.dropna(subset=["Datetime", "TNow", "RHNow", "Latitude", "Longitude"]).copy()
     df = df[(df["Latitude"] != 0) & (df["Longitude"] != 0)].copy()
 
-    # Greece only
     c = df["Country"].astype(str).str.strip().str.upper()
     df = df[c.isin(["GR", "GREECE"])].copy()
 
-    # Same bbox guard for Greece-only product
+    # loose geographic guard
     df = df[
         df["Longitude"].between(GRID_LON_MIN - 2.0, GRID_LON_MAX + 2.0) &
         df["Latitude"].between(GRID_LAT_MIN - 2.0, GRID_LAT_MAX + 2.0)
     ].copy()
 
-    # Recent observations only
     athens_now = datetime.now(ATHENS_TZ)
     threshold = athens_now - timedelta(minutes=WEATHER_TIME_WINDOW_MIN)
     df = df[df["Datetime"] >= threshold].copy()
@@ -382,12 +371,6 @@ def load_and_clean_weather_feed(text: str) -> pd.DataFrame:
 # WET BULB
 # =============================================================================
 def wet_bulb_stull(t_c, rh_pct):
-    """
-    Stull (2011) approximation, valid for typical near-surface conditions.
-    Inputs:
-      t_c: air temperature in °C
-      rh_pct: RH in %
-    """
     t = np.asarray(t_c, dtype=float)
     rh = np.asarray(rh_pct, dtype=float)
     rh = np.clip(rh, 1.0, 100.0)
@@ -550,7 +533,7 @@ def build_variable_grid_local_lr_wgs(
 
 
 # =============================================================================
-# H-SAF H68 DOWNLOAD / READ
+# H-SAF FTP / NETCDF
 # =============================================================================
 def ftp_connect_hsaf(host, user, passwd, attempts=5, timeout=90):
     last_err = None
@@ -568,28 +551,27 @@ def ftp_connect_hsaf(host, user, passwd, attempts=5, timeout=90):
             time.sleep(sleep_s)
     raise last_err
 
-def hsaf_list_latest_file():
+def hsaf_list_latest_h60_file():
     ftp = ftp_connect_hsaf(HSAF_HOST, HSAF_USER, HSAF_PASS)
     try:
         ftp.cwd(HSAF_REMOTE_DIR)
         names = ftp.nlst()
         basenames = [os.path.basename(n) for n in names if n]
-        files = [n for n in basenames if H68_FILE_RE.match(n)]
+        files = [n for n in basenames if H60_FILE_RE.match(n)]
         if not files:
-            raise RuntimeError(f"No H68 files found in {HSAF_REMOTE_DIR}")
+            raise RuntimeError(f"No H60 files found in {HSAF_REMOTE_DIR}")
         files.sort()
-        latest = files[-1]
-        return latest
+        return files[-1]
     finally:
         try:
             ftp.quit()
         except Exception:
             pass
 
-def hsaf_download_file(remote_name: str, local_path: str):
+def hsaf_download_file(remote_dir: str, remote_name: str, local_path: str):
     ftp = ftp_connect_hsaf(HSAF_HOST, HSAF_USER, HSAF_PASS)
     try:
-        ftp.cwd(HSAF_REMOTE_DIR)
+        ftp.cwd(remote_dir)
         with open(local_path, "wb") as f:
             ftp.retrbinary("RETR " + remote_name, f.write)
         print(f"[hsaf] downloaded {remote_name}")
@@ -599,11 +581,20 @@ def hsaf_download_file(remote_name: str, local_path: str):
         except Exception:
             pass
 
-def open_h68_dataset_from_gz(gz_path: str):
-    """
-    Returns dict with lon, lat, rr, qind, TotalCount.
-    """
-    tmp_nc = tempfile.NamedTemporaryFile(prefix="h68_", suffix=".nc", delete=False)
+def ensure_hsaf_latlon_utility():
+    local_path = os.path.join(CACHE_DIR, "lat_lon_0.nc")
+    if os.path.exists(local_path):
+        return local_path
+
+    try:
+        hsaf_download_file("utilities/matlab_code", "lat_lon_0.nc", local_path)
+        print("[hsaf] downloaded lat_lon_0.nc utility")
+        return local_path
+    except Exception as e:
+        raise RuntimeError(f"Could not download H-SAF lat/lon utility file: {e}")
+
+def open_h60_netcdf_from_gz(gz_path: str):
+    tmp_nc = tempfile.NamedTemporaryFile(prefix="h60_", suffix=".nc", delete=False)
     tmp_nc_path = tmp_nc.name
     tmp_nc.close()
 
@@ -611,85 +602,46 @@ def open_h68_dataset_from_gz(gz_path: str):
         with gzip.open(gz_path, "rb") as f_in, open(tmp_nc_path, "wb") as f_out:
             shutil.copyfileobj(f_in, f_out)
 
-        if XR_OK:
-            ds = xr.open_dataset(tmp_nc_path)
-            out = {}
-            for var in ["lon", "lat", "rr", "qind", "TotalCount", "phase"]:
-                if var in ds.variables:
-                    out[var] = ds[var].values
-                else:
-                    out[var] = None
-            ds.close()
-            return out
+        ds = Dataset(tmp_nc_path, "r")
 
-        if NC4_OK:
-            ds = Dataset(tmp_nc_path, "r")
-            out = {}
-            for var in ["lon", "lat", "rr", "qind", "TotalCount", "phase"]:
-                if var in ds.variables:
-                    out[var] = ds.variables[var][:]
-                else:
-                    out[var] = None
-            ds.close()
-            return out
+        if "rr" not in ds.variables or "qind" not in ds.variables:
+            raise RuntimeError("H60 NetCDF missing rr and/or qind variables.")
 
-        raise RuntimeError("Neither xarray nor netCDF4 is available to read H68 NetCDF.")
+        v_rr = ds.variables["rr"]
+        v_qi = ds.variables["qind"]
 
+        rr_raw = np.array(v_rr[:], dtype=float)
+        qind_raw = np.array(v_qi[:], dtype=float)
+
+        rr_missing = getattr(v_rr, "missing_value", -99)
+        qi_missing = getattr(v_qi, "missing_value", -99)
+        rr_scale = getattr(v_rr, "scale_factor", 1.0)
+        rr_offset = getattr(v_rr, "add_offset", 0.0)
+
+        # Manual says rr is stored as short with scale_factor=0.1 and missing_value=-99
+        rr = np.where(rr_raw == rr_missing, np.nan, rr_raw)
+        rr = rr * float(rr_scale) + float(rr_offset)
+
+        qind = np.where(qind_raw == qi_missing, np.nan, qind_raw)
+
+        ds.close()
+        return rr, qind
     finally:
         try:
             os.remove(tmp_nc_path)
         except Exception:
             pass
 
-def prepare_h68_grid(raw: dict):
-    lon = np.asarray(raw["lon"], dtype=float).reshape(-1)
-    lat = np.asarray(raw["lat"], dtype=float).reshape(-1)
-    rr = np.asarray(raw["rr"], dtype=float)
-    qind = None if raw["qind"] is None else np.asarray(raw["qind"], dtype=float)
-    tcount = None if raw["TotalCount"] is None else np.asarray(raw["TotalCount"], dtype=float)
-
-    # Handle shape ambiguity from manual / file structure
-    if rr.shape == (len(lat), len(lon)):
-        pass
-    elif rr.shape == (len(lon), len(lat)):
-        rr = rr.T
-        if qind is not None and qind.shape == (len(lon), len(lat)):
-            qind = qind.T
-        if tcount is not None and tcount.shape == (len(lon), len(lat)):
-            tcount = tcount.T
-    else:
-        raise RuntimeError(f"Unexpected rr shape {rr.shape} for lon={len(lon)}, lat={len(lat)}")
-
-    if qind is None:
-        qind = np.full_like(rr, np.nan, dtype=float)
-    else:
-        if qind.shape == (len(lon), len(lat)):
-            qind = qind.T
-        elif qind.shape != rr.shape:
-            qind = np.full_like(rr, np.nan, dtype=float)
-
-    if tcount is None:
-        tcount = np.full_like(rr, np.nan, dtype=float)
-    else:
-        if tcount.shape == (len(lon), len(lat)):
-            tcount = tcount.T
-        elif tcount.shape != rr.shape:
-            tcount = np.full_like(rr, np.nan, dtype=float)
-
-    # Ensure ascending axes for RegularGridInterpolator
-    if lat[0] > lat[-1]:
-        lat = lat[::-1]
-        rr = rr[::-1, :]
-        qind = qind[::-1, :]
-        tcount = tcount[::-1, :]
-
-    if lon[0] > lon[-1]:
-        lon = lon[::-1]
-        rr = rr[:, ::-1]
-        qind = qind[:, ::-1]
-        tcount = tcount[:, ::-1]
-
-    return lon, lat, rr, qind, tcount
+def read_hsaf_latlon_utility(nc_path: str):
+    ds = Dataset(nc_path, "r")
+    try:
+        if "lat" not in ds.variables or "lon" not in ds.variables:
+            raise RuntimeError("lat_lon_0.nc missing lat/lon variables.")
+        lat = np.array(ds.variables["lat"][:], dtype=float)
+        lon = np.array(ds.variables["lon"][:], dtype=float)
+        return lat, lon
+    finally:
+        ds.close()
 
 
 # =============================================================================
@@ -714,11 +666,15 @@ def ftps_connect_with_retries(host, user, passwd, attempts=6, base_sleep=5, time
 
 def ftp_upload_file(local_file: str, timeout: int = 60):
     if not ftp_enabled():
+        print("ℹ️ FTP disabled. Skipping upload.")
         return
+
     remote_filename = os.path.basename(local_file)
     ftps = ftps_connect_with_retries(FTP_HOST, FTP_USER, FTP_PASS, attempts=6, base_sleep=5, timeout=timeout)
+
     try:
         with open(local_file, "rb") as f:
+            # Upload to current remote directory only, no subfolders
             ftps.storbinary("STOR " + remote_filename, f)
         print(f"📤 Uploaded: {remote_filename}")
     finally:
@@ -729,7 +685,7 @@ def ftp_upload_file(local_file: str, timeout: int = 60):
 
 
 # =============================================================================
-# PLOTTING
+# PLOTTING HELPERS
 # =============================================================================
 def draw_greece_outline(ax):
     if not SHOW_GREECE_OUTLINE:
@@ -746,20 +702,19 @@ def draw_greece_outline(ax):
     except Exception as e:
         print(f"⚠️ Could not draw Greece outline: {e}")
 
-def common_footer(ax, created_dt_ath, weather_until, h68_start_utc, h68_end_utc, tw_global_lapse):
+def common_footer(ax, created_dt_ath, weather_until, h60_dt_utc, tw_global_lapse):
     timestamp_text = created_dt_ath.strftime("%Y-%m-%d %H:%M") + f" {athens_abbrev(created_dt_ath)}"
-    hsaf_window = "—"
-    if h68_start_utc and h68_end_utc:
-        hsaf_window = f"{h68_start_utc.strftime('%Y-%m-%d %H:%M')} to {h68_end_utc.strftime('%H:%M')} UTC"
+    hsaf_time = h60_dt_utc.strftime("%Y-%m-%d %H:%M UTC") if h60_dt_utc else "—"
 
     left_text = (
         f"Δημιουργήθηκε για το {BRAND_NAME}\n"
         f"{timestamp_text}\n"
-        f"weathernow έως: {weather_until}"
+        f"weathernow έως: {weather_until}\n"
+        f"Copyright {created_dt_ath.year} EUMETSAT"
     )
     right_text = (
-        f"H-SAF H68\n"
-        f"{hsaf_window}\n"
+        f"H-SAF H60B\n"
+        f"{hsaf_time}\n"
         f"Tw lapse: {tw_global_lapse*1000:.2f} °C/km"
     )
 
@@ -780,46 +735,39 @@ def common_footer(ax, created_dt_ath, weather_until, h68_start_utc, h68_end_utc,
         bbox=transparent_bbox(pad=0.3, rounded=True)
     )
 
-def save_combined_phase_map(
+def save_phase_map(
     out_path,
-    grid_lon, grid_lat,
-    phase_idx,
-    rr_grid,
-    created_dt_ath,
-    weather_until,
-    h68_start_utc, h68_end_utc,
-    tw_global_lapse
+    lon2d, lat2d, phase_idx, rr2d,
+    created_dt_ath, weather_until, h60_dt_utc, tw_global_lapse
 ):
     fig, ax = plt.subplots(figsize=(10, 10), dpi=300)
 
-    phase_arr = ma.masked_invalid(phase_idx)
-    ax.imshow(
-        phase_arr,
-        extent=(GRID_LON_MIN, GRID_LON_MAX, GRID_LAT_MIN, GRID_LAT_MAX),
-        origin="lower",
+    rr_for_contour = np.where(np.isfinite(rr2d) & (rr2d >= MIN_RR_TO_PLOT), rr2d, np.nan)
+
+    pcm = ax.pcolormesh(
+        lon2d, lat2d, phase_idx,
         cmap=PHASE_CMAP,
         norm=PHASE_NORM,
-        alpha=0.75
+        shading="auto",
+        alpha=0.78
     )
 
-    rr_for_contour = np.where(np.isfinite(rr_grid) & (rr_grid >= 0.1), rr_grid, np.nan)
     try:
         ax.contour(
-            grid_lon, grid_lat, rr_for_contour,
-            levels=[0.1, 0.5, 1, 2, 5, 10],
+            lon2d, lat2d, rr_for_contour,
+            levels=[0.1, 0.5, 1, 2, 5, 10, 20],
             colors="black",
-            linewidths=0.7
+            linewidths=0.6
         )
     except Exception:
         pass
 
     draw_greece_outline(ax)
 
-    from matplotlib.patches import Patch
     handles = [
-        Patch(facecolor="#3182bd", edgecolor="black", label="Rain likely"),
-        Patch(facecolor="#9e9ac8", edgecolor="black", label="Mixed / sleet-favoured"),
-        Patch(facecolor="#f16913", edgecolor="black", label="Snow likely"),
+        Patch(facecolor="#3182bd", edgecolor="black", label="Βροχή πιθανή"),
+        Patch(facecolor="#9e9ac8", edgecolor="black", label="Μικτός / sleet πιθανός"),
+        Patch(facecolor="#f16913", edgecolor="black", label="Χιόνι πιθανό"),
     ]
     ax.legend(handles=handles, loc="upper left", fontsize=9, frameon=True)
 
@@ -827,43 +775,38 @@ def save_combined_phase_map(
     ax.set_ylim(GRID_LAT_MIN, GRID_LAT_MAX)
     ax.set_xlabel("Γεωγρ. μήκος", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
-    ax.set_title("Πιθανή φάση υετού με βάση H-SAF H68 + Tw", fontsize=14, pad=10)
+    ax.set_title("Πιθανή φάση υετού με βάση H-SAF H60B + Tw", fontsize=14, pad=10)
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
-    common_footer(ax, created_dt_ath, weather_until, h68_start_utc, h68_end_utc, tw_global_lapse)
+    common_footer(ax, created_dt_ath, weather_until, h60_dt_utc, tw_global_lapse)
 
     plt.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
     print(f"✅ Saved: {out_path}")
 
-def save_rate_map(
+def save_rr_map(
     out_path,
     title,
-    rr_masked,
-    grid_lon, grid_lat,
-    created_dt_ath,
-    weather_until,
-    h68_start_utc, h68_end_utc,
-    tw_global_lapse
+    lon2d, lat2d, rr2d,
+    created_dt_ath, weather_until, h60_dt_utc, tw_global_lapse
 ):
     fig, ax = plt.subplots(figsize=(10, 10), dpi=300)
 
-    arr = ma.masked_invalid(rr_masked)
-    img = ax.imshow(
-        arr,
-        extent=(GRID_LON_MIN, GRID_LON_MAX, GRID_LAT_MIN, GRID_LAT_MAX),
-        origin="lower",
+    arr = ma.masked_invalid(rr2d)
+
+    img = ax.pcolormesh(
+        lon2d, lat2d, arr,
         cmap=PRECIP_CMAP,
         norm=PRECIP_NORM,
-        alpha=0.85
+        shading="auto"
     )
 
     try:
         ax.contour(
-            grid_lon, grid_lat, np.where(np.isfinite(rr_masked) & (rr_masked >= 0.1), rr_masked, np.nan),
-            levels=[0.1, 0.5, 1, 2, 5, 10],
+            lon2d, lat2d, np.where(np.isfinite(rr2d) & (rr2d >= MIN_RR_TO_PLOT), rr2d, np.nan),
+            levels=[0.1, 0.5, 1, 2, 5, 10, 20],
             colors="black",
-            linewidths=0.7
+            linewidths=0.6
         )
     except Exception:
         pass
@@ -873,7 +816,7 @@ def save_rate_map(
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="3%", pad=0.1)
     cbar = plt.colorbar(img, cax=cax, boundaries=PRECIP_BOUNDS, extend="max")
-    cbar.set_label("H-SAF H68 precipitation rate (mm/h)", fontsize=11)
+    cbar.set_label("H-SAF H60B precipitation rate (mm/h)", fontsize=11)
 
     ax.set_xlim(GRID_LON_MIN, GRID_LON_MAX)
     ax.set_ylim(GRID_LAT_MIN, GRID_LAT_MAX)
@@ -882,7 +825,7 @@ def save_rate_map(
     ax.set_title(title, fontsize=14, pad=10)
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
-    common_footer(ax, created_dt_ath, weather_until, h68_start_utc, h68_end_utc, tw_global_lapse)
+    common_footer(ax, created_dt_ath, weather_until, h60_dt_utc, tw_global_lapse)
 
     plt.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
@@ -896,26 +839,38 @@ def main():
     ensure_geojson_and_altitude_bundle()
 
     # -------------------------------------------------------------------------
-    # 1) Download latest H68 file
+    # 1) Latest H60B file
     # -------------------------------------------------------------------------
-    latest_remote = hsaf_list_latest_file()
-    h68_start_utc, h68_end_utc = parse_h68_times_from_name(latest_remote)
+    latest_remote = hsaf_list_latest_h60_file()
+    h60_dt_utc = parse_h60_time_from_name(latest_remote)
 
-    if h68_end_utc is not None:
-        age_h = (datetime.now(UTC) - h68_end_utc).total_seconds() / 3600.0
-        if age_h > HSAF_MAX_AGE_HOURS:
-            print(f"⚠️ Latest H68 file is old ({age_h:.1f} h): {latest_remote}")
+    if h60_dt_utc is not None:
+        age_min = (datetime.now(UTC) - h60_dt_utc).total_seconds() / 60.0
+        if age_min > HSAF_MAX_AGE_MIN:
+            print(f"⚠️ Latest H60B file is older than expected: {latest_remote} ({age_min:.0f} min old)")
 
-    local_gz = os.path.join(OUTPUT_DIR, latest_remote)
-    hsaf_download_file(latest_remote, local_gz)
+    local_gz = os.path.join(CACHE_DIR, latest_remote)
+    hsaf_download_file(HSAF_REMOTE_DIR, latest_remote, local_gz)
 
-    raw = open_h68_dataset_from_gz(local_gz)
-    h68_lon, h68_lat, h68_rr, h68_qind, h68_tcount = prepare_h68_grid(raw)
+    rr_full, qind_full = open_h60_netcdf_from_gz(local_gz)
+
+    latlon_nc = ensure_hsaf_latlon_utility()
+    lat_full, lon_full = read_hsaf_latlon_utility(latlon_nc)
+
+    if rr_full.shape != lat_full.shape or rr_full.shape != lon_full.shape:
+        # Manual says rr may be stored with x/y ordering; utility lat/lon may be y/x.
+        if rr_full.T.shape == lat_full.shape:
+            rr_full = rr_full.T
+            qind_full = qind_full.T
+        else:
+            raise RuntimeError(
+                f"Shape mismatch: rr={rr_full.shape}, lat={lat_full.shape}, lon={lon_full.shape}"
+            )
 
     # -------------------------------------------------------------------------
-    # 2) Weather feed
+    # 2) Weather feed and Tw field
     # -------------------------------------------------------------------------
-    cache_txt = os.path.join(BASE_DIR, "weathernow_cached.txt")
+    cache_txt = os.path.join(CACHE_DIR, "weathernow_cached.txt")
     weather_text, source = robust_fetch_text(CURRENTWEATHER_URL, cache_txt=cache_txt, timeout=60, tries=6)
     with open(cache_txt, "w", encoding="utf-8") as f:
         f.write(weather_text)
@@ -923,7 +878,6 @@ def main():
     wdf = load_and_clean_weather_feed(weather_text)
     weather_until = fmt_data_until(wdf["Datetime"].max())
 
-    # Station wet-bulb
     wdf["Tw"] = wet_bulb_stull(wdf["TNow"].values, wdf["RHNow"].values)
 
     station_lons = wdf["Longitude"].values.astype(float)
@@ -931,15 +885,12 @@ def main():
     station_tw = wdf["Tw"].values.astype(float)
     station_alt = sample_altitude_vrt_m(ALT_VRT_PATH, station_lons, station_lats)
 
-    # -------------------------------------------------------------------------
-    # 3) Target Greece grid (same bbox, EPSG:4326)
-    # -------------------------------------------------------------------------
+    # Regular Greece grid for Tw interpolation
     grid_lon, grid_lat = np.meshgrid(
         np.linspace(GRID_LON_MIN, GRID_LON_MAX, GRID_N),
         np.linspace(GRID_LAT_MIN, GRID_LAT_MAX, GRID_N)
     )
 
-    # Wet-bulb field
     tw_grid, tw_global_lapse = build_variable_grid_local_lr_wgs(
         GRID_LON_MIN, GRID_LON_MAX, GRID_LAT_MIN, GRID_LAT_MAX,
         grid_lon, grid_lat,
@@ -950,51 +901,67 @@ def main():
     )
 
     # -------------------------------------------------------------------------
-    # 4) Interpolate H68 to target grid
+    # 3) Subset H60B over Greece bbox, no clipping to land
     # -------------------------------------------------------------------------
-    rr_interp = RegularGridInterpolator(
-        (h68_lat, h68_lon), h68_rr,
-        bounds_error=False, fill_value=np.nan
-    )
-    qind_interp = RegularGridInterpolator(
-        (h68_lat, h68_lon), h68_qind,
-        bounds_error=False, fill_value=np.nan
-    )
-    tcount_interp = RegularGridInterpolator(
-        (h68_lat, h68_lon), h68_tcount,
-        bounds_error=False, fill_value=np.nan
+    bbox_mask = (
+        np.isfinite(lat_full) &
+        np.isfinite(lon_full) &
+        lon_full >= GRID_LON_MIN & lon_full <= GRID_LON_MAX &
+        lat_full >= GRID_LAT_MIN & lat_full <= GRID_LAT_MAX
     )
 
-    pts = np.c_[grid_lat.ravel(), grid_lon.ravel()]
-    rr_grid = rr_interp(pts).reshape(grid_lon.shape)
-    qind_grid = qind_interp(pts).reshape(grid_lon.shape)
-    tcount_grid = tcount_interp(pts).reshape(grid_lon.shape)
+    if not np.any(bbox_mask):
+        raise RuntimeError("No H60B pixels found inside Greece bbox.")
 
-    # H-SAF support filtering
-    support_mask = (
-        np.isfinite(rr_grid) &
-        np.isfinite(qind_grid) &
-        np.isfinite(tcount_grid) &
-        (tcount_grid >= MIN_TOTALCOUNT) &
-        (qind_grid >= MIN_QIND)
+    rows, cols = np.where(bbox_mask)
+    r0, r1 = rows.min(), rows.max() + 1
+    c0, c1 = cols.min(), cols.max() + 1
+
+    lat_sub = lat_full[r0:r1, c0:c1]
+    lon_sub = lon_full[r0:r1, c0:c1]
+    rr_sub = rr_full[r0:r1, c0:c1]
+    qi_sub = qind_full[r0:r1, c0:c1]
+
+    # quality filtering
+    rr_sub = np.where(np.isfinite(rr_sub), rr_sub, np.nan)
+    qi_sub = np.where(np.isfinite(qi_sub), qi_sub, np.nan)
+
+    valid_precip_mask = (
+        np.isfinite(lat_sub) &
+        np.isfinite(lon_sub) &
+        np.isfinite(rr_sub) &
+        np.isfinite(qi_sub) &
+        (qi_sub >= MIN_QIND) &
+        (rr_sub >= MIN_RR_TO_PLOT)
     )
-
-    rr_grid = np.where(support_mask, rr_grid, np.nan)
 
     # -------------------------------------------------------------------------
-    # 5) Phase classification based on your Tw thresholds
+    # 4) Interpolate Tw onto H60B pixels
     # -------------------------------------------------------------------------
-    precip_mask = np.isfinite(rr_grid) & (rr_grid >= MIN_RR_TO_PLOT) & np.isfinite(tw_grid)
+    tw_interp = LinearNDInterpolator(
+        np.column_stack([grid_lon.ravel(), grid_lat.ravel()]),
+        tw_grid.ravel(),
+        fill_value=np.nan
+    )
 
-    phase_idx = np.full(grid_lon.shape, np.nan, dtype=float)
-    # 0 rain, 1 mixed, 2 snow
-    phase_idx[precip_mask & (tw_grid > TW_MIXED_MAX)] = 0
-    phase_idx[precip_mask & (tw_grid > TW_SNOW_MAX) & (tw_grid <= TW_MIXED_MAX)] = 1
-    phase_idx[precip_mask & (tw_grid <= TW_SNOW_MAX)] = 2
+    tw_sub = tw_interp(lon_sub, lat_sub)
 
-    rr_rain = np.where(phase_idx == 0, rr_grid, np.nan)
-    rr_mixed = np.where(phase_idx == 1, rr_grid, np.nan)
-    rr_snow = np.where(phase_idx == 2, rr_grid, np.nan)
+    # -------------------------------------------------------------------------
+    # 5) Phase classification
+    # -------------------------------------------------------------------------
+    phase_idx = np.full(rr_sub.shape, np.nan, dtype=float)
+
+    rain_mask = valid_precip_mask & np.isfinite(tw_sub) & (tw_sub > TW_MIXED_MAX)
+    mixed_mask = valid_precip_mask & np.isfinite(tw_sub) & (tw_sub > TW_SNOW_MAX) & (tw_sub <= TW_MIXED_MAX)
+    snow_mask = valid_precip_mask & np.isfinite(tw_sub) & (tw_sub <= TW_SNOW_MAX)
+
+    phase_idx[rain_mask] = 0
+    phase_idx[mixed_mask] = 1
+    phase_idx[snow_mask] = 2
+
+    rr_rain = np.where(rain_mask, rr_sub, np.nan)
+    rr_mixed = np.where(mixed_mask, rr_sub, np.nan)
+    rr_snow = np.where(snow_mask, rr_sub, np.nan)
 
     # -------------------------------------------------------------------------
     # 6) Outputs
@@ -1002,58 +969,41 @@ def main():
     created_dt_ath = datetime.now(ATHENS_TZ)
     ts = created_dt_ath.strftime("%Y-%m-%d-%H-%M")
 
-    out_combined = os.path.join(OUTPUT_DIR, f"ptype_h68_combined_{ts}.png")
-    out_rain = os.path.join(OUTPUT_DIR, f"ptype_h68_rain_{ts}.png")
-    out_mixed = os.path.join(OUTPUT_DIR, f"ptype_h68_mixed_{ts}.png")
-    out_snow = os.path.join(OUTPUT_DIR, f"ptype_h68_snow_{ts}.png")
+    out_combined = os.path.join(OUTPUT_DIR, f"ptype_h60_combined_{ts}.png")
+    out_rain = os.path.join(OUTPUT_DIR, f"ptype_h60_rain_{ts}.png")
+    out_mixed = os.path.join(OUTPUT_DIR, f"ptype_h60_mixed_{ts}.png")
+    out_snow = os.path.join(OUTPUT_DIR, f"ptype_h60_snow_{ts}.png")
 
-    latest_combined = os.path.join(OUTPUT_DIR, "ptype_h68_combined_latest.png")
-    latest_rain = os.path.join(OUTPUT_DIR, "ptype_h68_rain_latest.png")
-    latest_mixed = os.path.join(OUTPUT_DIR, "ptype_h68_mixed_latest.png")
-    latest_snow = os.path.join(OUTPUT_DIR, "ptype_h68_snow_latest.png")
+    latest_combined = os.path.join(OUTPUT_DIR, "ptype_h60_combined_latest.png")
+    latest_rain = os.path.join(OUTPUT_DIR, "ptype_h60_rain_latest.png")
+    latest_mixed = os.path.join(OUTPUT_DIR, "ptype_h60_mixed_latest.png")
+    latest_snow = os.path.join(OUTPUT_DIR, "ptype_h60_snow_latest.png")
 
-    save_combined_phase_map(
+    save_phase_map(
         out_combined,
-        grid_lon, grid_lat,
-        phase_idx,
-        rr_grid,
-        created_dt_ath,
-        weather_until,
-        h68_start_utc, h68_end_utc,
-        tw_global_lapse
+        lon_sub, lat_sub, phase_idx, rr_sub,
+        created_dt_ath, weather_until, h60_dt_utc, tw_global_lapse
     )
 
-    save_rate_map(
+    save_rr_map(
         out_rain,
-        "H-SAF H68 precipitation rate where rain is likely (Tw > 1.5°C)",
-        rr_rain,
-        grid_lon, grid_lat,
-        created_dt_ath,
-        weather_until,
-        h68_start_utc, h68_end_utc,
-        tw_global_lapse
+        "H-SAF H60B precipitation rate όπου βροχή πιθανή (Tw > 1.5°C)",
+        lon_sub, lat_sub, rr_rain,
+        created_dt_ath, weather_until, h60_dt_utc, tw_global_lapse
     )
 
-    save_rate_map(
+    save_rr_map(
         out_mixed,
-        "H-SAF H68 precipitation rate where mixed / sleet-favoured (0.5°C < Tw ≤ 1.5°C)",
-        rr_mixed,
-        grid_lon, grid_lat,
-        created_dt_ath,
-        weather_until,
-        h68_start_utc, h68_end_utc,
-        tw_global_lapse
+        "H-SAF H60B precipitation rate όπου μικτός / sleet πιθανός (0.5°C < Tw ≤ 1.5°C)",
+        lon_sub, lat_sub, rr_mixed,
+        created_dt_ath, weather_until, h60_dt_utc, tw_global_lapse
     )
 
-    save_rate_map(
+    save_rr_map(
         out_snow,
-        "H-SAF H68 precipitation rate where snow is likely (Tw ≤ 0.5°C)",
-        rr_snow,
-        grid_lon, grid_lat,
-        created_dt_ath,
-        weather_until,
-        h68_start_utc, h68_end_utc,
-        tw_global_lapse
+        "H-SAF H60B precipitation rate όπου χιόνι πιθανό (Tw ≤ 0.5°C)",
+        lon_sub, lat_sub, rr_snow,
+        created_dt_ath, weather_until, h60_dt_utc, tw_global_lapse
     )
 
     shutil.copy(out_combined, latest_combined)
@@ -1066,10 +1016,14 @@ def main():
     print(f"✅ Saved latest: {latest_mixed}")
     print(f"✅ Saved latest: {latest_snow}")
 
-    # Optional upload using your existing FTP credentials
+    # -------------------------------------------------------------------------
+    # 7) Upload PNGs to current remote FTP folder only, no subfolders
+    # -------------------------------------------------------------------------
     try:
-        for fp in [out_combined, out_rain, out_mixed, out_snow,
-                   latest_combined, latest_rain, latest_mixed, latest_snow]:
+        for fp in [
+            out_combined, out_rain, out_mixed, out_snow,
+            latest_combined, latest_rain, latest_mixed, latest_snow
+        ]:
             ftp_upload_file(fp)
     except Exception as e:
         print(f"⚠️ FTP upload failed: {e}")
