@@ -685,6 +685,38 @@ def _build_lonlat_from_geos(ds):
             loff = getattr(ds, "loff", getattr(ds, "LOFF", None))
 
         if None in (cfac, lfac, coff, loff):
+            print("=== DEBUG H60 NAVIGATION ===")
+            print("variables:", list(ds.variables.keys()))
+            print("global attrs:", list(ds.ncattrs()))
+            for an in ds.ncattrs():
+                try:
+                    print(f"GLOBAL {an} = {getattr(ds, an)}")
+                except Exception:
+                    pass
+
+            print("projection variable:", geos_name)
+            try:
+                print("projection attrs:", gvar.ncattrs())
+                for an in gvar.ncattrs():
+                    try:
+                        print(f"GVAR {an} = {getattr(gvar, an)}")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            for vname in ds.variables.keys():
+                try:
+                    vv = ds.variables[vname]
+                    print(f"VAR {vname} dims={vv.dimensions} shape={vv.shape}")
+                    for an in vv.ncattrs():
+                        try:
+                            print(f"  {vname}.{an} = {getattr(vv, an)}")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
             raise RuntimeError(
                 "Could not find x/y variables or CFAC/LFAC/COFF/LOFF navigation metadata in H60 NetCDF."
             )
