@@ -78,15 +78,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Verify meteoam files exist
+      - name: Verify required files exist
         run: |
-          test -f meteoam/meteoam.py || { echo "meteoam/meteoam.py missing"; exit 1; }
-          test -f meteoam/greece.geojson.enc || { echo "meteoam/greece.geojson.enc missing"; exit 1; }
-          test -f meteoam/altitude.zip.enc || { echo "meteoam/altitude.zip.enc missing"; exit 1; }
+          test -f meteoam.py || { echo "meteoam.py missing"; exit 1; }
+          test -f requirements.txt || { echo "requirements.txt missing"; exit 1; }
+          test -f greece.geojson.enc || { echo "greece.geojson.enc missing"; exit 1; }
+          test -f altitude.zip.enc || { echo "altitude.zip.enc missing"; exit 1; }
+          test -d docs/testmaps || { echo "docs/testmaps missing"; exit 1; }
 
       - name: Decrypt greece.geojson if needed
-        working-directory: meteoam
-        if: ${{ hashFiles('meteoam/greece.geojson') == '' }}
+        if: ${{ hashFiles('greece.geojson') == '' }}
         run: |
           test -f greece.geojson.enc || { echo "greece.geojson.enc missing"; exit 1; }
           test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
@@ -99,8 +100,7 @@ jobs:
           ls -l greece.geojson
 
       - name: Decrypt + unzip DEM bundle if needed
-        working-directory: meteoam
-        if: ${{ hashFiles('meteoam/GRC_alt.vrt') == '' }}
+        if: ${{ hashFiles('GRC_alt.vrt') == '' }}
         run: |
           test -f altitude.zip.enc || { echo "altitude.zip.enc missing"; exit 1; }
           test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
@@ -140,10 +140,18 @@ jobs:
           PY
 
       - name: Run meteoam.py
-        working-directory: meteoam
         run: |
           python -V
           python meteoam.py
+
+      - name: Copy PNGs to docs/testmaps
+        if: always()
+        run: |
+          mkdir -p docs/testmaps
+          if [ -d ptype_hsaf_greece ]; then
+            cp -f ptype_hsaf_greece/*.png docs/testmaps/ 2>/dev/null || true
+          fi
+          ls -la docs/testmaps || true
 
       - name: Upload meteoam artifacts
         if: always()
@@ -151,6 +159,7 @@ jobs:
         with:
           name: meteoam_outputs
           path: |
-            meteoam/ptype_hsaf_greece/**
+            ptype_hsaf_greece/**
+            docs/testmaps/**
           if-no-files-found: warn
           retention-days: 7
