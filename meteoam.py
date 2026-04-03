@@ -1048,8 +1048,10 @@ def main():
     bbox_mask = (
         np.isfinite(lat_full) &
         np.isfinite(lon_full) &
-        lon_full >= GRID_LON_MIN & lon_full <= GRID_LON_MAX &
-        lat_full >= GRID_LAT_MIN & lat_full <= GRID_LAT_MAX
+        (lon_full >= GRID_LON_MIN) &
+        (lon_full <= GRID_LON_MAX) &
+        (lat_full >= GRID_LAT_MIN) &
+        (lat_full <= GRID_LAT_MAX)
     )
 
     if not np.any(bbox_mask):
