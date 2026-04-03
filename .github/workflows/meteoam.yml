@@ -1,0 +1,81 @@
+name: meteoam
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-meteoam:
+    runs-on: ubuntu-latest
+
+    env:
+      CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
+      GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
+      BRAND_NAME: ${{ secrets.BRAND_NAME }}
+
+      FTP_HOST: ${{ secrets.FTP_HOST }}
+      FTP_USER: ${{ secrets.FTP_USER }}
+      FTP_PASS: ${{ secrets.FTP_PASS }}
+
+      HSAF_HOST: ${{ secrets.HSAF_HOST }}
+      HSAF_USER: ${{ secrets.HSAF_USER }}
+      HSAF_PASS: ${{ secrets.HSAF_PASS }}
+      HSAF_REMOTE_DIR: ${{ secrets.HSAF_REMOTE_DIR }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('meteoam/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gdal-bin \
+            libgdal-dev \
+            libproj-dev \
+            proj-data \
+            proj-bin \
+            libgeos-dev \
+            libopenjp2-7 \
+            libopenjp2-7-dev \
+            libspatialindex-dev \
+            libnetcdf-dev \
+            netcdf-bin \
+            openssl
+
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r meteoam/requirements.txt
+
+      - name: Verify required files exist
+        run: |
+          test -f meteoam/meteoam.py
+          test -f meteoam/requirements.txt
+          test -f meteoam/greece.geojson.enc
+          test -f meteoam/altitude.zip.enc
+
+      - name: Run meteoam script
+        working-directory: meteoam
+        run: |
+          python meteoam.py
+
+      - name: Upload generated PNGs as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: meteoam_outputs
+          path: |
+            meteoam/ptype_hsaf_greece/*.png
+          if-no-files-found: warn
