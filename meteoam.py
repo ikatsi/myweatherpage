@@ -608,18 +608,13 @@ def _find_geos_var(ds):
 
 def _build_lonlat_from_geos(ds):
     """
-    Try to derive lon/lat from x/y + geostationary projection metadata
-    contained in the H60 file itself.
+    Derive lon/lat from geostationary projection metadata in the H60 file.
+
+    Strategy:
+    1) Use explicit x/y coordinate variables if they exist.
+    2) Otherwise reconstruct x/y from MSG navigation coefficients
+       (CFAC/LFAC/COFF/LOFF style attributes), using the rr array shape.
     """
-    x_name = _find_var_name(ds, ["x", "xc"])
-    y_name = _find_var_name(ds, ["y", "yc"])
-
-    if x_name is None or y_name is None:
-        raise RuntimeError("Could not find x/y coordinate variables in H60 NetCDF.")
-
-    x = np.array(ds.variables[x_name][:], dtype=float)
-    y = np.array(ds.variables[y_name][:], dtype=float)
-
     geos_name = _find_geos_var(ds)
     if geos_name is None:
         raise RuntimeError("Could not find geostationary projection metadata variable in H60 NetCDF.")
@@ -635,20 +630,82 @@ def _build_lonlat_from_geos(ds):
     if lon_0 is None or h is None:
         raise RuntimeError("Missing longitude_of_projection_origin and/or perspective_point_height in H60 NetCDF.")
 
-    # If x/y are scan angles in radians, convert to projection metres.
-    # If already metres, leave as-is.
-    x_units = str(getattr(ds.variables[x_name], "units", "")).lower()
-    y_units = str(getattr(ds.variables[y_name], "units", "")).lower()
+    x_name = _find_var_name(ds, ["x", "xc"])
+    y_name = _find_var_name(ds, ["y", "yc"])
 
-    x_is_angle = ("rad" in x_units) or (np.nanmax(np.abs(x)) < 1.0)
-    y_is_angle = ("rad" in y_units) or (np.nanmax(np.abs(y)) < 1.0)
+    # ------------------------------------------------------------------
+    # Case 1: explicit x/y variables exist
+    # ------------------------------------------------------------------
+    if x_name is not None and y_name is not None:
+        x = np.array(ds.variables[x_name][:], dtype=float)
+        y = np.array(ds.variables[y_name][:], dtype=float)
 
-    if x_is_angle:
-        x = x * float(h)
-    if y_is_angle:
-        y = y * float(h)
+        x_units = str(getattr(ds.variables[x_name], "units", "")).lower()
+        y_units = str(getattr(ds.variables[y_name], "units", "")).lower()
 
-    xx, yy = np.meshgrid(x, y)
+        x_is_angle = ("rad" in x_units) or (np.nanmax(np.abs(x)) < 1.0)
+        y_is_angle = ("rad" in y_units) or (np.nanmax(np.abs(y)) < 1.0)
+
+        if x_is_angle:
+            x = x * float(h)
+        if y_is_angle:
+            y = y * float(h)
+
+        xx, yy = np.meshgrid(x, y)
+
+    # ------------------------------------------------------------------
+    # Case 2: no x/y variables, reconstruct from CFAC/LFAC/COFF/LOFF
+    # ------------------------------------------------------------------
+    else:
+        rr_var = ds.variables["rr"]
+        if rr_var.ndim < 2:
+            raise RuntimeError("rr variable is not 2D, cannot reconstruct H60 geostationary grid.")
+
+        nlines, ncols = rr_var.shape[-2], rr_var.shape[-1]
+
+        def _get_attr_any(obj, names, default=None):
+            for nm in names:
+                if hasattr(obj, nm):
+                    return getattr(obj, nm)
+            return default
+
+        # Try projection-variable attrs first, then global attrs
+        cfac = _get_attr_any(gvar, ["cfac", "CFAC"], None)
+        lfac = _get_attr_any(gvar, ["lfac", "LFAC"], None)
+        coff = _get_attr_any(gvar, ["coff", "COFF"], None)
+        loff = _get_attr_any(gvar, ["loff", "LOFF"], None)
+
+        if cfac is None:
+            cfac = getattr(ds, "cfac", getattr(ds, "CFAC", None))
+        if lfac is None:
+            lfac = getattr(ds, "lfac", getattr(ds, "LFAC", None))
+        if coff is None:
+            coff = getattr(ds, "coff", getattr(ds, "COFF", None))
+        if loff is None:
+            loff = getattr(ds, "loff", getattr(ds, "LOFF", None))
+
+        if None in (cfac, lfac, coff, loff):
+            raise RuntimeError(
+                "Could not find x/y variables or CFAC/LFAC/COFF/LOFF navigation metadata in H60 NetCDF."
+            )
+
+        cfac = float(cfac)
+        lfac = float(lfac)
+        coff = float(coff)
+        loff = float(loff)
+
+        cols = np.arange(ncols, dtype=float)
+        lines = np.arange(nlines, dtype=float)
+
+        # MSG navigation coefficients produce scan angles in radians
+        x_ang = (cols - coff) * (2.0 ** 16) / cfac
+        y_ang = (lines - loff) * (2.0 ** 16) / lfac
+
+        # convert scan angles to projected metres for pyproj geos
+        x = x_ang * float(h)
+        y = y_ang * float(h)
+
+        xx, yy = np.meshgrid(x, y)
 
     crs_geos = CRS.from_proj4(
         f"+proj=geos +lon_0={float(lon_0)} +h={float(h)} "
@@ -677,6 +734,7 @@ def open_h60_netcdf_from_gz(gz_path: str):
     tmp_nc_path = tmp_nc.name
     tmp_nc.close()
 
+    ds = None
     try:
         with gzip.open(gz_path, "rb") as f_in, open(tmp_nc_path, "wb") as f_out:
             shutil.copyfileobj(f_in, f_out)
@@ -719,15 +777,18 @@ def open_h60_netcdf_from_gz(gz_path: str):
         else:
             lat2d, lon2d = _build_lonlat_from_geos(ds)
 
-        ds.close()
         return rr, qind, lat2d, lon2d
 
     finally:
         try:
+            if ds is not None:
+                ds.close()
+        except Exception:
+            pass
+        try:
             os.remove(tmp_nc_path)
         except Exception:
             pass
-
 
 # =============================================================================
 # OPTIONAL UPLOAD HELPERS
