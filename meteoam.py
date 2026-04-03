@@ -171,6 +171,14 @@ PHASE_NORM = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], PHASE_CMAP.N)
 # =============================================================================
 # SMALL HELPERS
 # =============================================================================
+def safe_remove_file(path):
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+            print(f"🗑️ Removed local file: {path}")
+    except Exception as e:
+        print(f"⚠️ Could not remove local file {path}: {e}")
+
 def ftp_enabled():
     return bool(FTP_HOST and FTP_USER and FTP_PASS)
 
@@ -1218,15 +1226,23 @@ def main():
     # -------------------------------------------------------------------------
     # 7) Upload PNGs to current remote FTP folder only, no subfolders
     # -------------------------------------------------------------------------
+    uploaded_files = [
+        out_combined, out_rain, out_mixed, out_snow,
+        latest_combined, latest_rain, latest_mixed, latest_snow
+    ]
+
     try:
-        for fp in [
-            out_combined, out_rain, out_mixed, out_snow,
-            latest_combined, latest_rain, latest_mixed, latest_snow
-        ]:
+        for fp in uploaded_files:
             ftp_upload_file(fp)
+
+        for fp in uploaded_files:
+            safe_remove_file(fp)
+
+        safe_remove_file(local_gz)
+        safe_remove_file(cache_txt)
+
     except Exception as e:
         print(f"⚠️ FTP upload failed: {e}")
-
     print("Done.")
 
 
