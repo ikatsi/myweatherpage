@@ -879,6 +879,68 @@ def ftp_upload_file(local_file: str, timeout: int = 60):
         except Exception:
             pass
 
+def ftp_prune_timestamped_older_than(prefix: str, latest_name: str, max_age_hours: int = 24, timeout: int = 60):
+    """
+    Delete remote timestamped PNGs older than max_age_hours.
+
+    Expected filename pattern:
+      {prefix}YYYY-MM-DD-HH-MM.png
+
+    Example:
+      prefix="ptype_h60_rain_"
+      file="ptype_h60_rain_2026-04-03-13-15.png"
+    """
+    if not ftp_enabled():
+        print("ℹ️ FTP disabled. Skipping remote prune.")
+        return
+
+    pat = re.compile(
+        rf"^{re.escape(prefix)}(\d{{4}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}})\.png$"
+    )
+
+    cutoff = datetime.now(ATHENS_TZ) - timedelta(hours=max_age_hours)
+
+    ftps = ftps_connect_with_retries(
+        FTP_HOST, FTP_USER, FTP_PASS,
+        attempts=6, base_sleep=5, timeout=timeout
+    )
+
+    try:
+        try:
+            names = ftps.nlst()
+        except Exception as e:
+            print(f"⚠️ Could not list remote directory for prune: {e}")
+            return
+
+        basenames = [os.path.basename(n) for n in names if n]
+
+        for fname in basenames:
+            if fname == latest_name:
+                continue
+
+            m = pat.match(fname)
+            if not m:
+                continue
+
+            ts_str = m.group(1)
+            try:
+                file_dt = datetime.strptime(ts_str, "%Y-%m-%d-%H-%M").replace(tzinfo=ATHENS_TZ)
+            except Exception:
+                print(f"⚠️ Could not parse timestamp from remote file: {fname}")
+                continue
+
+            if file_dt < cutoff:
+                try:
+                    ftps.delete(fname)
+                    print(f"🧹 Deleted old remote file: {fname}")
+                except Exception as e:
+                    print(f"⚠️ Failed to delete remote file {fname}: {e}")
+
+    finally:
+        try:
+            ftps.quit()
+        except Exception:
+            pass
 
 # =============================================================================
 # PLOTTING HELPERS
@@ -1230,19 +1292,24 @@ def main():
         out_combined, out_rain, out_mixed, out_snow,
         latest_combined, latest_rain, latest_mixed, latest_snow
     ]
-
+    
     try:
         for fp in uploaded_files:
             ftp_upload_file(fp)
-
+    
+        ftp_prune_timestamped_older_than("ptype_h60_combined_", "ptype_h60_combined_latest.png", max_age_hours=24)
+        ftp_prune_timestamped_older_than("ptype_h60_rain_", "ptype_h60_rain_latest.png", max_age_hours=24)
+        ftp_prune_timestamped_older_than("ptype_h60_mixed_", "ptype_h60_mixed_latest.png", max_age_hours=24)
+        ftp_prune_timestamped_older_than("ptype_h60_snow_", "ptype_h60_snow_latest.png", max_age_hours=24)
+    
         for fp in uploaded_files:
             safe_remove_file(fp)
-
+    
         safe_remove_file(local_gz)
         safe_remove_file(cache_txt)
-
+    
     except Exception as e:
-        print(f"⚠️ FTP upload failed: {e}")
+        print(f"⚠️ FTP upload/prune failed: {e}")
     print("Done.")
 
 
