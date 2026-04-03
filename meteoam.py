@@ -897,7 +897,7 @@ def common_footer(ax, created_dt_ath, weather_until, h60_dt_utc, tw_global_lapse
     left_text = (
         f"Δημιουργήθηκε για το {BRAND_NAME}\n"
         f"{timestamp_text}\n"
-        f"Τελ. δεδ. σταθμών έως: {weather_until}\n"
+        f"Παρατηρ. επιφανείας έως: {weather_until}\n"
         f"Copyright {created_dt_ath.year} EUMETSAT"
     )
     right_text = (
