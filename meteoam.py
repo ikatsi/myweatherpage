@@ -66,7 +66,7 @@ from scipy.interpolate import LinearNDInterpolator
 
 import rasterio
 from rasterio.warp import transform as rio_transform
-from pyproj import Transformer
+from pyproj import Transformer, CRS
 import requests
 
 from netCDF4 import Dataset
@@ -137,9 +137,6 @@ USE_DISTANCE_WEIGHTS = True
 
 # H60B filename pattern from PUM
 H60_FILE_RE = re.compile(r"^h60_\d{8}_\d{4}_fdk\.nc\.gz$", re.IGNORECASE)
-
-# H-SAF utility file for lon/lat
-HSAF_UTILITY_LATLON_REMOTE = "utilities/matlab_code/lat_lon_0.nc"
 
 # Quality filtering
 MIN_QIND = 1.0
@@ -551,6 +548,7 @@ def ftp_connect_hsaf(host, user, passwd, attempts=5, timeout=90):
             time.sleep(sleep_s)
     raise last_err
 
+
 def hsaf_list_latest_h60_file():
     ftp = ftp_connect_hsaf(HSAF_HOST, HSAF_USER, HSAF_PASS)
     try:
@@ -568,6 +566,7 @@ def hsaf_list_latest_h60_file():
         except Exception:
             pass
 
+
 def hsaf_download_file(remote_dir: str, remote_name: str, local_path: str):
     ftp = ftp_connect_hsaf(HSAF_HOST, HSAF_USER, HSAF_PASS)
     try:
@@ -581,19 +580,99 @@ def hsaf_download_file(remote_dir: str, remote_name: str, local_path: str):
         except Exception:
             pass
 
-def ensure_hsaf_latlon_utility():
-    local_path = os.path.join(CACHE_DIR, "lat_lon_0.nc")
-    if os.path.exists(local_path):
-        return local_path
 
-    try:
-        hsaf_download_file("utilities/matlab_code", "lat_lon_0.nc", local_path)
-        print("[hsaf] downloaded lat_lon_0.nc utility")
-        return local_path
-    except Exception as e:
-        raise RuntimeError(f"Could not download H-SAF lat/lon utility file: {e}")
+def _find_var_name(ds, candidates):
+    vars_lower = {name.lower(): name for name in ds.variables.keys()}
+    for cand in candidates:
+        if cand.lower() in vars_lower:
+            return vars_lower[cand.lower()]
+    return None
+
+
+def _find_geos_var(ds):
+    for name, var in ds.variables.items():
+        try:
+            gmn = getattr(var, "grid_mapping_name", None)
+            if gmn and str(gmn).lower() == "geostationary":
+                return name
+        except Exception:
+            pass
+
+    for name, var in ds.variables.items():
+        attrs = getattr(var, "ncattrs", lambda: [])()
+        if "perspective_point_height" in attrs or "longitude_of_projection_origin" in attrs:
+            return name
+
+    return None
+
+
+def _build_lonlat_from_geos(ds):
+    """
+    Try to derive lon/lat from x/y + geostationary projection metadata
+    contained in the H60 file itself.
+    """
+    x_name = _find_var_name(ds, ["x", "xc"])
+    y_name = _find_var_name(ds, ["y", "yc"])
+
+    if x_name is None or y_name is None:
+        raise RuntimeError("Could not find x/y coordinate variables in H60 NetCDF.")
+
+    x = np.array(ds.variables[x_name][:], dtype=float)
+    y = np.array(ds.variables[y_name][:], dtype=float)
+
+    geos_name = _find_geos_var(ds)
+    if geos_name is None:
+        raise RuntimeError("Could not find geostationary projection metadata variable in H60 NetCDF.")
+
+    gvar = ds.variables[geos_name]
+
+    lon_0 = getattr(gvar, "longitude_of_projection_origin", None)
+    h = getattr(gvar, "perspective_point_height", None)
+    sweep = getattr(gvar, "sweep_angle_axis", "y")
+    a = getattr(gvar, "semi_major_axis", None)
+    b = getattr(gvar, "semi_minor_axis", None)
+
+    if lon_0 is None or h is None:
+        raise RuntimeError("Missing longitude_of_projection_origin and/or perspective_point_height in H60 NetCDF.")
+
+    # If x/y are scan angles in radians, convert to projection metres.
+    # If already metres, leave as-is.
+    x_units = str(getattr(ds.variables[x_name], "units", "")).lower()
+    y_units = str(getattr(ds.variables[y_name], "units", "")).lower()
+
+    x_is_angle = ("rad" in x_units) or (np.nanmax(np.abs(x)) < 1.0)
+    y_is_angle = ("rad" in y_units) or (np.nanmax(np.abs(y)) < 1.0)
+
+    if x_is_angle:
+        x = x * float(h)
+    if y_is_angle:
+        y = y * float(h)
+
+    xx, yy = np.meshgrid(x, y)
+
+    crs_geos = CRS.from_proj4(
+        f"+proj=geos +lon_0={float(lon_0)} +h={float(h)} "
+        f"+a={float(a) if a is not None else 6378169.0} "
+        f"+b={float(b) if b is not None else 6356583.8} "
+        f"+sweep={sweep} +units=m +no_defs"
+    )
+    transformer = Transformer.from_crs(crs_geos, "EPSG:4326", always_xy=True)
+    lon2d, lat2d = transformer.transform(xx, yy)
+
+    lon2d = np.asarray(lon2d, dtype=float)
+    lat2d = np.asarray(lat2d, dtype=float)
+
+    lon2d[~np.isfinite(lon2d)] = np.nan
+    lat2d[~np.isfinite(lat2d)] = np.nan
+
+    return lat2d, lon2d
+
 
 def open_h60_netcdf_from_gz(gz_path: str):
+    """
+    Returns:
+        rr, qind, lat2d, lon2d
+    """
     tmp_nc = tempfile.NamedTemporaryFile(prefix="h60_", suffix=".nc", delete=False)
     tmp_nc_path = tmp_nc.name
     tmp_nc.close()
@@ -618,30 +697,36 @@ def open_h60_netcdf_from_gz(gz_path: str):
         rr_scale = getattr(v_rr, "scale_factor", 1.0)
         rr_offset = getattr(v_rr, "add_offset", 0.0)
 
-        # Manual says rr is stored as short with scale_factor=0.1 and missing_value=-99
         rr = np.where(rr_raw == rr_missing, np.nan, rr_raw)
         rr = rr * float(rr_scale) + float(rr_offset)
 
         qind = np.where(qind_raw == qi_missing, np.nan, qind_raw)
 
+        # Prefer explicit lat/lon if present
+        lat_name = _find_var_name(ds, ["lat", "latitude"])
+        lon_name = _find_var_name(ds, ["lon", "longitude"])
+
+        if lat_name is not None and lon_name is not None:
+            latv = np.array(ds.variables[lat_name][:], dtype=float)
+            lonv = np.array(ds.variables[lon_name][:], dtype=float)
+
+            if latv.ndim == 1 and lonv.ndim == 1:
+                lon2d, lat2d = np.meshgrid(lonv, latv)
+            elif latv.ndim == 2 and lonv.ndim == 2:
+                lat2d, lon2d = latv, lonv
+            else:
+                raise RuntimeError("Unsupported lat/lon dimensions in H60 NetCDF.")
+        else:
+            lat2d, lon2d = _build_lonlat_from_geos(ds)
+
         ds.close()
-        return rr, qind
+        return rr, qind, lat2d, lon2d
+
     finally:
         try:
             os.remove(tmp_nc_path)
         except Exception:
             pass
-
-def read_hsaf_latlon_utility(nc_path: str):
-    ds = Dataset(nc_path, "r")
-    try:
-        if "lat" not in ds.variables or "lon" not in ds.variables:
-            raise RuntimeError("lat_lon_0.nc missing lat/lon variables.")
-        lat = np.array(ds.variables["lat"][:], dtype=float)
-        lon = np.array(ds.variables["lon"][:], dtype=float)
-        return lat, lon
-    finally:
-        ds.close()
 
 
 # =============================================================================
@@ -852,19 +937,15 @@ def main():
     local_gz = os.path.join(CACHE_DIR, latest_remote)
     hsaf_download_file(HSAF_REMOTE_DIR, latest_remote, local_gz)
 
-    rr_full, qind_full = open_h60_netcdf_from_gz(local_gz)
-
-    latlon_nc = ensure_hsaf_latlon_utility()
-    lat_full, lon_full = read_hsaf_latlon_utility(latlon_nc)
+    rr_full, qind_full, lat_full, lon_full = open_h60_netcdf_from_gz(local_gz)
 
     if rr_full.shape != lat_full.shape or rr_full.shape != lon_full.shape:
-        # Manual says rr may be stored with x/y ordering; utility lat/lon may be y/x.
         if rr_full.T.shape == lat_full.shape:
             rr_full = rr_full.T
             qind_full = qind_full.T
         else:
             raise RuntimeError(
-                f"Shape mismatch: rr={rr_full.shape}, lat={lat_full.shape}, lon={lon_full.shape}"
+                f"Shape mismatch after H60 read: rr={rr_full.shape}, lat={lat_full.shape}, lon={lon_full.shape}"
             )
 
     # -------------------------------------------------------------------------
