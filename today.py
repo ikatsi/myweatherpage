@@ -64,30 +64,15 @@ import requests
 from ftplib import FTP_TLS
 import rasterio
 from pyproj import Transformer
+from common_abbrev import shorten_for_box
+import json
 
 
 # =========================
 # CONFIG
 # =========================
-EXCLUDE_TMAX_WEBCODES = {"hua_ilion", "hua_argyroupoli", "age_leventochori", "age_vrana", "age_leptokarya"}
-EXCLUDE_PPN_WEBCODES = {
-    "pws2_chalkida",
-    "age_vrana",
-    "potamoi",
-    "age_leptokarya",
-    "hnms3_megara",
-    "iaasars_mandraektropi",
-    "ntua_zografou",
-    "wu_afidnes",
-    "wu_sykamino",
-    "hnms3_prokopi",
-    "wl_velestino",
-    "wu_lefki",
-    "hcmr_georganades",
-    "hcmr_raxa",
-    "age_kissavos"
-}
 EXCLUDE_ALL_WEBCODES = {"pws_gebze"}
+RAW_EXCLUSION_RULES = os.environ.get("STATION_EXCLUSION_RULES", "").strip()
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__) or ".")
 
@@ -205,6 +190,128 @@ LAPSE_RADIUS_M = 150_000
 LAPSE_MIN_NBR = 8
 LAPSE_ALT_RANGE_MIN_M = 200
 
+# =========================
+# SHARED EXCLUSION RULES
+# =========================
+def load_exclusion_rules():
+    if not RAW_EXCLUSION_RULES:
+        return {
+            "version": None,
+            "propagation": {
+                "rain_implies_precip": True,
+                "today_precip_implies_rain": True
+            },
+            "hard_excludes": {
+                "temperature": [],
+                "precip": [],
+                "rain": []
+            },
+            "hard_exclude_prefixes": {
+                "temperature": [],
+                "precip": [],
+                "rain": []
+            },
+            "date_rules": []
+        }
+
+    try:
+        rules = json.loads(RAW_EXCLUSION_RULES)
+    except Exception as e:
+        raise SystemExit("Failed to parse STATION_EXCLUSION_RULES JSON: {}".format(e))
+
+    if not isinstance(rules, dict):
+        raise SystemExit("STATION_EXCLUSION_RULES must decode to a JSON object.")
+
+    rules.setdefault("propagation", {})
+    rules.setdefault("hard_excludes", {})
+    rules.setdefault("hard_exclude_prefixes", {})
+    rules.setdefault("date_rules", [])
+
+    for fam in ("temperature", "precip", "rain"):
+        rules["hard_excludes"].setdefault(fam, [])
+        rules["hard_exclude_prefixes"].setdefault(fam, [])
+
+    return rules
+
+
+EXCLUSION_RULES = load_exclusion_rules()
+
+
+def _norm_webcode(x):
+    if x is None:
+        return ""
+    return str(x).strip().casefold()
+
+
+def _norm_family(x):
+    return str(x).strip().casefold()
+
+
+def _parse_rule_date(x):
+    if x in (None, "", "null"):
+        return None
+    return pd.to_datetime(x, errors="coerce").date()
+
+
+def is_excluded_for_family(webcode, family, on_date, rules=None):
+    if rules is None:
+        rules = EXCLUSION_RULES
+
+    wc = _norm_webcode(webcode)
+    fam = _norm_family(family)
+
+    if not wc:
+        return False
+
+    hard = {_norm_webcode(x) for x in rules.get("hard_excludes", {}).get(fam, [])}
+    if wc in hard:
+        return True
+
+    prefixes = [
+        str(x).strip().casefold()
+        for x in rules.get("hard_exclude_prefixes", {}).get(fam, [])
+        if str(x).strip()
+    ]
+    for pref in prefixes:
+        if wc.startswith(pref):
+            return True
+
+    for rule in rules.get("date_rules", []):
+        if _norm_webcode(rule.get("webcode")) != wc:
+            continue
+        if _norm_family(rule.get("family")) != fam:
+            continue
+
+        start = _parse_rule_date(rule.get("start"))
+        end = _parse_rule_date(rule.get("end"))
+
+        if start is not None and on_date < start:
+            continue
+        if end is not None and on_date > end:
+            continue
+
+        return True
+
+    return False
+
+
+def apply_family_exclusions(df, family, on_date, rules=None):
+    if rules is None:
+        rules = EXCLUSION_RULES
+
+    if "webcode" not in df.columns:
+        return df.copy()
+
+    out = df.copy()
+    webcodes = (
+        out["webcode"].astype(str)
+        .str.replace("\ufeff", "", regex=False)
+        .str.replace("ï»¿", "", regex=False)
+        .str.strip()
+    )
+
+    mask = webcodes.apply(lambda w: is_excluded_for_family(w, family, on_date, rules))
+    return out.loc[~mask].copy()
 
 # =========================
 # SHARED TEMP PALETTE
@@ -286,29 +393,6 @@ def ensure_dem_present() -> None:
 # =========================
 # TEXT HELPERS
 # =========================
-def prettify_station_name(s: str) -> str:
-    if s is None:
-        return "–"
-    s = str(s).strip()
-    s = s.replace("Ιερά Μονή", "Ι.Μ.")
-    s = s.replace("Μητροπολιτικό Πάρκο", "Πάρκο")
-    s = s.replace("Διεθνές Αεροδρόμιο", "Α/Δ")
-    s = s.replace("Αεροδρόμιο", "Α/Δ")
-    s = s.replace("Πανεπιστήμιο", "Παν.")
-    s = s.replace("Νοσοκομείο", "Νοσ.")
-    s = s.replace("Χιονοδρομικό κέντρο", "Χ/Κ")
-    s = s.replace("Καταφύγιο", "Καταφ.")
-    s = s.replace("Όρος", "Όρ.")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-
-def ellipsize(s: str, max_chars: int = 42) -> str:
-    s = str(s)
-    if len(s) <= max_chars:
-        return s
-    return s[: max_chars - 1].rstrip() + "…"
-
 
 def safe_name_from_row(r, prefer_col: str = "citygr") -> str:
     v = None
@@ -322,15 +406,6 @@ def safe_name_from_row(r, prefer_col: str = "citygr") -> str:
     return v
 
 
-def shorten_for_box(name: str, max_chars: int = TOPBOX_NAME_MAX) -> str:
-    s = prettify_station_name(name)
-    if "(" in s and ")" in s:
-        base = s.split("(", 1)[0].strip()
-        if base:
-            s = base
-    s = s.replace("«", "").replace("»", "").replace('"', "").replace("'", "")
-    s = re.sub(r"\s+", " ", s).strip()
-    return ellipsize(s, max_chars=max_chars)
 
 
 def stamp_text(athens_now: datetime) -> str:
@@ -819,55 +894,56 @@ def prepare_today_data(data: pd.DataFrame, athens_now: datetime) -> pd.DataFrame
         exclude_all = {w.strip().lower() for w in EXCLUDE_ALL_WEBCODES}
 
         mask = (
-            ~wc.str.match(r"(?i)^wu_lefkaditi$", na=False) &
-            ~wc.str.match(r"(?i)^age_klimamilou$", na=False) &
-            ~wc.str.match(r"(?i)^uoi_", na=False) &
             ~wc.isin(exclude_all)
         )
         today_data = today_data[mask].copy()
 
     return today_data
 
-def prepare_rain_data(today_data: pd.DataFrame) -> pd.DataFrame:
-    rr = today_data.copy()
+def prepare_rain_data(today_data: pd.DataFrame, on_date) -> pd.DataFrame:
+    rr = apply_family_exclusions(today_data, "precip", on_date, EXCLUSION_RULES)
 
-    if "webcode" in rr.columns:
-        rr["webcode_norm"] = (
+    if "webcode" in today_data.columns:
+        src = (
+            today_data["webcode"].astype(str)
+            .str.replace("\ufeff", "", regex=False)
+            .str.replace("ï»¿", "", regex=False)
+            .str.strip()
+        )
+        kept = (
             rr["webcode"].astype(str)
             .str.replace("\ufeff", "", regex=False)
             .str.replace("ï»¿", "", regex=False)
             .str.strip()
-            .str.lower()
         )
-
-        exclude_ppn = {w.strip().lower() for w in EXCLUDE_PPN_WEBCODES}
-        present = sorted(set(rr.loc[rr["webcode_norm"].isin(exclude_ppn), "webcode_norm"].unique()))
-        if present:
-            print("🌧️ Excluding from TodayRain:", present)
-
-        rr = rr[~rr["webcode_norm"].isin(exclude_ppn)].copy()
+        removed = sorted(set(src.str.casefold()) - set(kept.str.casefold()))
+        if removed:
+            print("🌧️ Excluding from TodayRain:", removed)
 
     return rr
 
-def prepare_tmax_data(today_data: pd.DataFrame) -> pd.DataFrame:
-    tt0 = today_data.copy()
 
-    if "webcode" in tt0.columns:
-        exclude = {str(w).strip().lower() for w in EXCLUDE_TMAX_WEBCODES}
-        tt0["webcode_norm"] = (
+def prepare_temp_data(today_data: pd.DataFrame, on_date) -> pd.DataFrame:
+    tt0 = apply_family_exclusions(today_data, "temperature", on_date, EXCLUSION_RULES)
+
+    if "webcode" in today_data.columns:
+        src = (
+            today_data["webcode"].astype(str)
+            .str.replace("\ufeff", "", regex=False)
+            .str.replace("ï»¿", "", regex=False)
+            .str.strip()
+        )
+        kept = (
             tt0["webcode"].astype(str)
             .str.replace("\ufeff", "", regex=False)
             .str.replace("ï»¿", "", regex=False)
             .str.strip()
-            .str.lower()
         )
-        present = sorted(set(tt0.loc[tt0["webcode_norm"].isin(exclude), "webcode_norm"].unique()))
-        if present:
-            print("🔥 Excluding from Tmax:", present)
-        tt0 = tt0[~tt0["webcode_norm"].isin(exclude)].copy()
+        removed = sorted(set(src.str.casefold()) - set(kept.str.casefold()))
+        if removed:
+            print("🌡️ Excluding from temperature maps:", removed)
 
     return tt0
-
 
 # =========================
 # NATIONAL MAPS
@@ -1380,7 +1456,7 @@ def make_temp_region_egsa(df, ctx, out_dir, athens_now, dem_path,
 def main():
     print("✅ RUNNING FILE:", os.path.abspath(__file__))
     print("✅ FTP enabled:", bool(FTP_HOST and FTP_USER and FTP_PASS))
-    print("✅ EXCLUDE_TMAX_WEBCODES:", EXCLUDE_TMAX_WEBCODES)
+    print("✅ Shared exclusion rules loaded:", EXCLUSION_RULES.get("version"))
 
     ensure_geojson_present()
     ensure_dem_present()
@@ -1414,16 +1490,19 @@ def main():
 
     
     # -------- Rain --------
-    rain_input = prepare_rain_data(today_data)
+    rain_input = prepare_rain_data(today_data, athens_now.date())
     rain_dir = os.path.join(BASE_DIR, "TodayRainMaps")
     rain_main, _ = make_todayrain_map_national(
         rain_input, greece, grid_x, grid_y, geo_mask, rain_dir, athens_now
     )
 
+    # -------- Temperature-family input (for both Tmin and Tmax) --------
+    temp_input = prepare_temp_data(today_data, athens_now.date())
+
     # -------- Tmin --------
     tmin_dir = os.path.join(BASE_DIR, "TminMaps")
     tmin_main, _ = make_temp_map_national(
-        today_data, greece, grid_x, grid_y, geo_mask, tmin_dir,
+        temp_input, greece, grid_x, grid_y, geo_mask, tmin_dir,
         athens_now, DEM_PATH,
         var_col="TMin",
         stable_name="tmin.png",
@@ -1434,7 +1513,7 @@ def main():
 
 
     # -------- Tmax --------
-    tmax_input = prepare_tmax_data(today_data)
+    tmax_input = temp_input
     tmax_dir = os.path.join(BASE_DIR, "TmaxMaps")
 
     tmax_main, _ = make_temp_map_national(
