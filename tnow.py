@@ -1869,8 +1869,8 @@ def main():
     
     # Exclude specific stations from all maps and top-5 lists
     if "webcode" in data.columns:
-        data = data[data["webcode"].astype(str).str.strip() != "wu_panoramavoulas"]
-
+        data = data[~data["webcode"].astype(str).str.strip().isin(["wu_panoramavoulas", "wu_tilos"])]
+    
     # Parse Datetime (timezone handling is done inside filter_fresh_rows)
     # data["Datetime"] = pd.to_datetime(data["Datetime"], errors="coerce")
 
