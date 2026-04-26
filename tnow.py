@@ -1866,6 +1866,10 @@ def main():
     data = data[(data["Latitude"].notna()) & (data["Longitude"].notna())]
     data = data[(data["Latitude"] != 0) & (data["Longitude"] != 0)]
     data = data[data["Longitude"] <= 30]
+    
+    # Exclude specific stations from all maps and top-5 lists
+    if "webcode" in data.columns:
+        data = data[data["webcode"].astype(str).str.strip() != "wu_panoramavoulas"]
 
     # Parse Datetime (timezone handling is done inside filter_fresh_rows)
     # data["Datetime"] = pd.to_datetime(data["Datetime"], errors="coerce")
