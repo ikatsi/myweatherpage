@@ -683,9 +683,10 @@ def ftps_connect_with_retries(host, user, passwd, attempts=6, base_sleep=5, time
             time.sleep(sleep_s)
     raise last_err
 
-def upload_to_ftp(local_file: str, remote_name: str = None, attempts: int = 3, timeout: int = 120):
+def upload_to_ftp(local_file: str, remote_name: str = None, timeout: int = 60) -> bool:
     """
-    Uploads a single file in its own FTPS session, with retries.
+    Uploads a single file in its own FTPS session.
+    Retries the CONNECTION (not the STOR), to match rainintensityall.py behavior.
     """
     if not (FTP_HOST and FTP_USER and FTP_PASS):
         return False
@@ -694,43 +695,41 @@ def upload_to_ftp(local_file: str, remote_name: str = None, attempts: int = 3, t
         return False
     if remote_name is None:
         remote_name = os.path.basename(local_file)
-    last_err = None
-    for i in range(attempts):
-        ftps = None
+    ftps = None
+    try:
+        ftps = ftps_connect_with_retries(
+            FTP_HOST, FTP_USER, FTP_PASS,
+            attempts=6, base_sleep=5, timeout=timeout
+        )
+        with open(local_file, "rb") as f:
+            ftps.storbinary("STOR " + remote_name, f)
+        print(f"📤 Uploaded: {remote_name}")
+        return True
+    except Exception as e:
+        print(f"⚠️ Upload failed for {remote_name}: {e}")
+        return False
+    finally:
         try:
-            ftps = ftps_connect_with_retries(
-                FTP_HOST, FTP_USER, FTP_PASS,
-                attempts=6, base_sleep=5, timeout=timeout
-            )
-            with open(local_file, "rb") as f:
-                ftps.storbinary("STOR " + remote_name, f)
-            print(f"📤 Uploaded: {remote_name}")
-            try:
+            if ftps is not None:
                 ftps.quit()
-            except Exception:
-                pass
-            return True
-        except Exception as e:
-            last_err = e
-            print(f"⚠️ Upload attempt {i+1}/{attempts} failed for {remote_name}: {e}")
+        except Exception:
             try:
                 if ftps is not None:
                     ftps.close()
             except Exception:
                 pass
-            sleep_s = 5 * (2 ** i)
-            time.sleep(sleep_s)
-    print(f"❌ Giving up on {remote_name} after {attempts} attempts: {last_err}")
-    return False
 
 def upload_all_to_ftp(files_to_upload):
     """
     Uploads each file in its OWN session, with per-file try/except,
     so one stuck transfer cannot kill the others.
+    Adds a small pause between files so the FTPS server can reset.
     """
     if not (FTP_HOST and FTP_USER and FTP_PASS):
         return
-    for local_file, remote_name in files_to_upload:
+    for i, (local_file, remote_name) in enumerate(files_to_upload):
+        if i > 0:
+            time.sleep(2)
         try:
             upload_to_ftp(local_file, remote_name)
         except Exception as e:
