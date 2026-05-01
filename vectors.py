@@ -676,6 +676,13 @@ def create_species_maps(species, label, ref_date):
 # FTP
 # -------------------------------------------------------------------
 
+FTP_CONNECT_ATTEMPTS = 3
+FTP_UPLOAD_ATTEMPTS = 2
+FTP_TIMEOUT_SECONDS = 45
+FTP_SLEEP_SECONDS = 8
+FTP_BLOCKSIZE = 65536
+
+
 def close_ftp_safely(ftps):
     if ftps is None:
         return
@@ -689,20 +696,20 @@ def close_ftp_safely(ftps):
             pass
 
 
-def ftp_connect(max_attempts=8, sleep_seconds=30, timeout_seconds=180):
+def ftp_connect():
     last_error = None
 
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, FTP_CONNECT_ATTEMPTS + 1):
         ftps = None
 
         try:
             print("Opening FTPS connection, attempt {}/{}...".format(
                 attempt,
-                max_attempts
+                FTP_CONNECT_ATTEMPTS
             ))
 
             ftps = FTP_TLS()
-            ftps.connect(FTP_HOST, 21, timeout=timeout_seconds)
+            ftps.connect(FTP_HOST, 21, timeout=FTP_TIMEOUT_SECONDS)
             ftps.login(user=FTP_USER, passwd=FTP_PASS)
             ftps.prot_p()
             ftps.set_pasv(True)
@@ -716,46 +723,36 @@ def ftp_connect(max_attempts=8, sleep_seconds=30, timeout_seconds=180):
         except Exception as e:
             last_error = e
             print("FTPS connection attempt {} failed: {}".format(attempt, e))
-
             close_ftp_safely(ftps)
 
-            if attempt < max_attempts:
-                print("Waiting {} seconds before retry...".format(sleep_seconds))
-                time.sleep(sleep_seconds)
+            if attempt < FTP_CONNECT_ATTEMPTS:
+                print("Waiting {} seconds before retry...".format(FTP_SLEEP_SECONDS))
+                time.sleep(FTP_SLEEP_SECONDS)
 
-    raise RuntimeError(
-        "Could not open FTPS connection after {} attempts. Last error: {}".format(
-            max_attempts,
-            last_error
-        )
-    )
+    raise RuntimeError("Could not open FTPS connection. Last error: {}".format(last_error))
 
 
-def upload_one_file_with_retries(path, max_attempts=5, sleep_seconds=20):
+def upload_one_file_with_retries(path):
     filename = Path(path).name
     last_error = None
 
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, FTP_UPLOAD_ATTEMPTS + 1):
         ftps = None
 
         try:
             print("Uploading {}, attempt {}/{}...".format(
                 filename,
                 attempt,
-                max_attempts
+                FTP_UPLOAD_ATTEMPTS
             ))
 
-            ftps = ftp_connect(
-                max_attempts=3,
-                sleep_seconds=15,
-                timeout_seconds=180
-            )
+            ftps = ftp_connect()
 
             with open(str(path), "rb") as f:
                 ftps.storbinary(
                     "STOR " + filename,
                     f,
-                    blocksize=262144
+                    blocksize=FTP_BLOCKSIZE
                 )
 
             print("Uploaded:", filename)
@@ -772,20 +769,20 @@ def upload_one_file_with_retries(path, max_attempts=5, sleep_seconds=20):
 
             close_ftp_safely(ftps)
 
-            if attempt < max_attempts:
+            if attempt < FTP_UPLOAD_ATTEMPTS:
                 print("Waiting {} seconds before retrying {}...".format(
-                    sleep_seconds,
+                    FTP_SLEEP_SECONDS,
                     filename
                 ))
-                time.sleep(sleep_seconds)
+                time.sleep(FTP_SLEEP_SECONDS)
 
-    raise RuntimeError(
-        "Could not upload {} after {} attempts. Last error: {}".format(
-            filename,
-            max_attempts,
-            last_error
-        )
-    )
+    print("Giving up on {} after {} attempts. Last error: {}".format(
+        filename,
+        FTP_UPLOAD_ATTEMPTS,
+        last_error
+    ))
+
+    return False
 
 
 def upload_files_via_ftp(file_paths):
@@ -796,17 +793,25 @@ def upload_files_via_ftp(file_paths):
     print("\nUploading PNG maps via FTPS...")
 
     uploaded = 0
+    failed = 0
 
     for path in file_paths:
-        upload_one_file_with_retries(
-            path,
-            max_attempts=5,
-            sleep_seconds=20
-        )
-        uploaded += 1
+        ok = upload_one_file_with_retries(path)
 
-    print("FTPS upload complete. Uploaded {} files.".format(uploaded))
+        if ok:
+            uploaded += 1
+        else:
+            failed += 1
 
+        time.sleep(2)
+
+    print("FTPS upload complete. Uploaded {} files. Failed {} files.".format(
+        uploaded,
+        failed
+    ))
+
+    if uploaded == 0:
+        raise RuntimeError("No PNG files were uploaded.")
 
 # -------------------------------------------------------------------
 # MAIN
