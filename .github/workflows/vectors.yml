@@ -13,7 +13,7 @@ permissions:
 jobs:
   generate-vector-maps:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 12
 
     env:
       MPLBACKEND: Agg
