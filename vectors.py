@@ -676,10 +676,25 @@ def create_species_maps(species, label, ref_date):
 # FTP
 # -------------------------------------------------------------------
 
-def ftp_connect(max_attempts=8, sleep_seconds=30):
+def close_ftp_safely(ftps):
+    if ftps is None:
+        return
+
+    try:
+        ftps.quit()
+    except Exception:
+        try:
+            ftps.close()
+        except Exception:
+            pass
+
+
+def ftp_connect(max_attempts=8, sleep_seconds=30, timeout_seconds=180):
     last_error = None
 
     for attempt in range(1, max_attempts + 1):
+        ftps = None
+
         try:
             print("Opening FTPS connection, attempt {}/{}...".format(
                 attempt,
@@ -687,23 +702,22 @@ def ftp_connect(max_attempts=8, sleep_seconds=30):
             ))
 
             ftps = FTP_TLS()
-            ftps.connect(FTP_HOST, 21, timeout=60)
+            ftps.connect(FTP_HOST, 21, timeout=timeout_seconds)
             ftps.login(user=FTP_USER, passwd=FTP_PASS)
             ftps.prot_p()
+            ftps.set_pasv(True)
 
             if FTP_TARGET_DIR not in ("", "/"):
                 ftps.cwd(FTP_TARGET_DIR)
 
+            print("FTPS session opened.")
             return ftps
 
         except Exception as e:
             last_error = e
             print("FTPS connection attempt {} failed: {}".format(attempt, e))
 
-            try:
-                ftps.close()
-            except Exception:
-                pass
+            close_ftp_safely(ftps)
 
             if attempt < max_attempts:
                 print("Waiting {} seconds before retry...".format(sleep_seconds))
@@ -717,6 +731,63 @@ def ftp_connect(max_attempts=8, sleep_seconds=30):
     )
 
 
+def upload_one_file_with_retries(path, max_attempts=5, sleep_seconds=20):
+    filename = Path(path).name
+    last_error = None
+
+    for attempt in range(1, max_attempts + 1):
+        ftps = None
+
+        try:
+            print("Uploading {}, attempt {}/{}...".format(
+                filename,
+                attempt,
+                max_attempts
+            ))
+
+            ftps = ftp_connect(
+                max_attempts=3,
+                sleep_seconds=15,
+                timeout_seconds=180
+            )
+
+            with open(str(path), "rb") as f:
+                ftps.storbinary(
+                    "STOR " + filename,
+                    f,
+                    blocksize=262144
+                )
+
+            print("Uploaded:", filename)
+            close_ftp_safely(ftps)
+            return True
+
+        except Exception as e:
+            last_error = e
+            print("Upload failed for {} on attempt {}: {}".format(
+                filename,
+                attempt,
+                e
+            ))
+
+            close_ftp_safely(ftps)
+
+            if attempt < max_attempts:
+                print("Waiting {} seconds before retrying {}...".format(
+                    sleep_seconds,
+                    filename
+                ))
+                time.sleep(sleep_seconds)
+
+    raise RuntimeError(
+        "Could not upload {} after {} attempts. Last error: {}".format(
+            filename,
+            max_attempts,
+            last_error
+        )
+    )
+
+
 def upload_files_via_ftp(file_paths):
     if not file_paths:
         print("No files to upload via FTP.")
@@ -724,32 +795,17 @@ def upload_files_via_ftp(file_paths):
 
     print("\nUploading PNG maps via FTPS...")
 
-    ftps = None
+    uploaded = 0
 
-    try:
-        ftps = ftp_connect(max_attempts=8, sleep_seconds=30)
-        print("FTPS session opened.")
+    for path in file_paths:
+        upload_one_file_with_retries(
+            path,
+            max_attempts=5,
+            sleep_seconds=20
+        )
+        uploaded += 1
 
-        for path in file_paths:
-            filename = Path(path).name
-            print("Uploading", filename)
-
-            with open(str(path), "rb") as f:
-                ftps.storbinary("STOR " + filename, f)
-
-            print("Uploaded:", filename)
-
-    finally:
-        if ftps is not None:
-            try:
-                ftps.quit()
-            except Exception:
-                try:
-                    ftps.close()
-                except Exception:
-                    pass
-
-    print("FTPS upload complete.")
+    print("FTPS upload complete. Uploaded {} files.".format(uploaded))
 
 
 # -------------------------------------------------------------------
