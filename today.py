@@ -38,6 +38,7 @@
 import os
 import re
 import time
+import socket
 import subprocess
 import zipfile
 from io import StringIO
@@ -661,46 +662,79 @@ def save_stable(fig, out_dir: str, out_name: str):
     fig.savefig(main_path, dpi=300, bbox_inches="tight")
     return main_path
     
-def upload_to_ftp(local_file: str, remote_name: str):
-    if not (FTP_HOST and FTP_USER and FTP_PASS):
-        return
-
-    ftps = FTP_TLS()
-    ftps.connect(FTP_HOST, 21, timeout=30)
-    ftps.login(user=FTP_USER, passwd=FTP_PASS)
-    ftps.prot_p()
-    try:
-        with open(local_file, "rb") as f:
-            ftps.storbinary("STOR " + remote_name, f)
-        print(f"📤 Uploaded: {remote_name}")
-    finally:
+def ftps_connect_with_retries(host, user, passwd, attempts=6, base_sleep=5, timeout=60):
+    """
+    Retries FTPS connect/login with exponential backoff.
+    Returns a logged-in FTP_TLS session in passive mode with PROT P.
+    """
+    last_err = None
+    for i in range(attempts):
         try:
-            ftps.quit()
-        except Exception:
-            pass
+            ftps = FTP_TLS()
+            ftps.connect(host, 21, timeout=timeout)
+            ftps.login(user=user, passwd=passwd)
+            ftps.prot_p()
+            ftps.set_pasv(True)
+            return ftps
+        except (socket.gaierror, OSError) as e:
+            last_err = e
+            sleep_s = base_sleep * (2 ** i)
+            print(f"⚠️ FTPS connect failed ({type(e).__name__}: {e}). Retry in {sleep_s}s...")
+            time.sleep(sleep_s)
+    raise last_err
 
-def upload_all_to_ftp(files_to_upload):
+def upload_to_ftp(local_file: str, remote_name: str = None, attempts: int = 3, timeout: int = 120):
+    """
+    Uploads a single file in its own FTPS session, with retries.
+    """
     if not (FTP_HOST and FTP_USER and FTP_PASS):
-        return
-
-    ftps = FTP_TLS()
-    ftps.connect(FTP_HOST, 21, timeout=30)
-    ftps.login(user=FTP_USER, passwd=FTP_PASS)
-    ftps.prot_p()
-
-    try:
-        for local_file, remote_name in files_to_upload:
-            if not local_file or not os.path.exists(local_file):
-                continue
+        return False
+    if not local_file or not os.path.exists(local_file):
+        print(f"⚠️ Skip upload (missing): {local_file}")
+        return False
+    if remote_name is None:
+        remote_name = os.path.basename(local_file)
+    last_err = None
+    for i in range(attempts):
+        ftps = None
+        try:
+            ftps = ftps_connect_with_retries(
+                FTP_HOST, FTP_USER, FTP_PASS,
+                attempts=6, base_sleep=5, timeout=timeout
+            )
             with open(local_file, "rb") as f:
                 ftps.storbinary("STOR " + remote_name, f)
             print(f"📤 Uploaded: {remote_name}")
-    finally:
-        try:
-            ftps.quit()
-        except Exception:
-            pass
+            try:
+                ftps.quit()
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            last_err = e
+            print(f"⚠️ Upload attempt {i+1}/{attempts} failed for {remote_name}: {e}")
+            try:
+                if ftps is not None:
+                    ftps.close()
+            except Exception:
+                pass
+            sleep_s = 5 * (2 ** i)
+            time.sleep(sleep_s)
+    print(f"❌ Giving up on {remote_name} after {attempts} attempts: {last_err}")
+    return False
 
+def upload_all_to_ftp(files_to_upload):
+    """
+    Uploads each file in its OWN session, with per-file try/except,
+    so one stuck transfer cannot kill the others.
+    """
+    if not (FTP_HOST and FTP_USER and FTP_PASS):
+        return
+    for local_file, remote_name in files_to_upload:
+        try:
+            upload_to_ftp(local_file, remote_name)
+        except Exception as e:
+            print(f"⚠️ FTP upload failed for {remote_name}: {e}")
 
 def add_top5_box(ax, title: str, lines: list, x0=0.99, y0=0.98, font_size=11, two_col_font_size=10.5, force_one_col=False, title_font_size=12):
     header = ax.text(
