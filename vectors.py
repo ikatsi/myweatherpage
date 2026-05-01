@@ -24,6 +24,7 @@ PNG maps are uploaded to the FTP root unless VECTOR_FTP_TARGET_DIR is set.
 
 import os
 import io
+import time
 import zipfile
 import subprocess
 from pathlib import Path
@@ -675,16 +676,45 @@ def create_species_maps(species, label, ref_date):
 # FTP
 # -------------------------------------------------------------------
 
-def ftp_connect():
-    ftps = FTP_TLS()
-    ftps.connect(FTP_HOST, 21, timeout=60)
-    ftps.login(user=FTP_USER, passwd=FTP_PASS)
-    ftps.prot_p()
+def ftp_connect(max_attempts=8, sleep_seconds=30):
+    last_error = None
 
-    if FTP_TARGET_DIR not in ("", "/"):
-        ftps.cwd(FTP_TARGET_DIR)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            print("Opening FTPS connection, attempt {}/{}...".format(
+                attempt,
+                max_attempts
+            ))
 
-    return ftps
+            ftps = FTP_TLS()
+            ftps.connect(FTP_HOST, 21, timeout=60)
+            ftps.login(user=FTP_USER, passwd=FTP_PASS)
+            ftps.prot_p()
+
+            if FTP_TARGET_DIR not in ("", "/"):
+                ftps.cwd(FTP_TARGET_DIR)
+
+            return ftps
+
+        except Exception as e:
+            last_error = e
+            print("FTPS connection attempt {} failed: {}".format(attempt, e))
+
+            try:
+                ftps.close()
+            except Exception:
+                pass
+
+            if attempt < max_attempts:
+                print("Waiting {} seconds before retry...".format(sleep_seconds))
+                time.sleep(sleep_seconds)
+
+    raise RuntimeError(
+        "Could not open FTPS connection after {} attempts. Last error: {}".format(
+            max_attempts,
+            last_error
+        )
+    )
 
 
 def upload_files_via_ftp(file_paths):
@@ -697,7 +727,7 @@ def upload_files_via_ftp(file_paths):
     ftps = None
 
     try:
-        ftps = ftp_connect()
+        ftps = ftp_connect(max_attempts=8, sleep_seconds=30)
         print("FTPS session opened.")
 
         for path in file_paths:
