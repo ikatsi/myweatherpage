@@ -12,10 +12,14 @@ write GeoTIFFs for all species, then create and upload PNG maps for:
 
 Designed for GitHub Actions.
 
-Input TSV:
-  https://www.e-kairos.gr/vectors/vector_indices_YYYYMMDD.tsv
+Input TSV is downloaded from:
 
-Uploads PNGs to the FTP root.
+  VECTOR_TSV_BASE_URL/vector_indices_YYYYMMDD.tsv
+
+where VECTOR_TSV_BASE_URL is a GitHub secret, for example:
+  https://www.e-kairos.gr/vectors
+
+PNG maps are uploaded to the FTP root unless VECTOR_FTP_TARGET_DIR is set.
 """
 
 import os
@@ -53,22 +57,27 @@ from pyproj import Transformer
 ATHENS_NOW = datetime.now(ZoneInfo("Europe/Athens"))
 RUN_DATE = ATHENS_NOW.strftime("%Y%m%d")
 
-DEFAULT_TSV_URL = "https://www.e-kairos.gr/vectors/vector_indices_{}.tsv?nocache={}".format(
-    RUN_DATE,
+VECTOR_TSV_BASE_URL = os.environ.get("VECTOR_TSV_BASE_URL", "").strip()
+if not VECTOR_TSV_BASE_URL:
+    raise RuntimeError("VECTOR_TSV_BASE_URL environment variable is not set.")
+
+TSV_NAME = "vector_indices_{}.tsv".format(RUN_DATE)
+TSV_URL = "{}/{}?nocache={}".format(
+    VECTOR_TSV_BASE_URL.rstrip("/"),
+    TSV_NAME,
     ATHENS_NOW.strftime("%Y%m%d%H%M%S")
 )
-
-TSV_URL = os.environ.get("VECTOR_INDICES_URL", "").strip()
-if not TSV_URL:
-    TSV_URL = DEFAULT_TSV_URL
 
 BASE_DIR = Path(__file__).resolve().parent
 
 OUTPUT_DIR = BASE_DIR / "vectors"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-DEM_PATH = Path(os.environ.get("VECTOR_DEM_PATH", "")).expanduser() if os.environ.get("VECTOR_DEM_PATH", "").strip() else OUTPUT_DIR / "GRC_alt_filled.tif"
-GREECE_GEOJSON = Path(os.environ.get("VECTOR_GEOJSON_PATH", "")).expanduser() if os.environ.get("VECTOR_GEOJSON_PATH", "").strip() else OUTPUT_DIR / "greece.geojson"
+DEM_ENV = os.environ.get("VECTOR_DEM_PATH", "").strip()
+GEOJSON_ENV = os.environ.get("VECTOR_GEOJSON_PATH", "").strip()
+
+DEM_PATH = Path(DEM_ENV).expanduser() if DEM_ENV else OUTPUT_DIR / "GRC_alt_filled.tif"
+GREECE_GEOJSON = Path(GEOJSON_ENV).expanduser() if GEOJSON_ENV else OUTPUT_DIR / "greece.geojson"
 
 FTP_HOST = os.environ.get("FTP_HOST", "").strip()
 FTP_USER = os.environ.get("FTP_USER", "").strip()
@@ -129,12 +138,18 @@ def require_env():
         missing.append("FTP_PASS")
 
     if missing:
-        raise RuntimeError("Missing required environment variables: {}".format(", ".join(missing)))
+        raise RuntimeError(
+            "Missing required environment variables: {}".format(
+                ", ".join(missing)
+            )
+        )
 
 
 def decrypt_file(in_path, out_path, password):
     if not password:
-        raise RuntimeError("GEOJSON_PASS is not set, cannot decrypt {}".format(in_path))
+        raise RuntimeError(
+            "GEOJSON_PASS is not set, cannot decrypt {}".format(in_path)
+        )
 
     subprocess.check_call([
         "openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2",
@@ -172,8 +187,8 @@ def ensure_greece_geojson():
             return
 
     raise RuntimeError(
-        "Greece GeoJSON not found. Expected vectors/greece.geojson, greece.geojson, "
-        "vectors/greece.geojson.enc, or greece.geojson.enc."
+        "Greece GeoJSON not found. Expected vectors/greece.geojson, "
+        "greece.geojson, vectors/greece.geojson.enc, or greece.geojson.enc."
     )
 
 
@@ -203,6 +218,7 @@ def ensure_dem():
 
             extract_dir = alt_enc.parent
             print("Extracting altitude bundle to:", extract_dir)
+
             with zipfile.ZipFile(str(alt_zip), "r") as zf:
                 zf.extractall(str(extract_dir))
 
@@ -225,8 +241,8 @@ def ensure_dem():
                     return
 
     raise RuntimeError(
-        "DEM not found. Expected vectors/GRC_alt_filled.tif, GRC_alt_filled.tif, "
-        "or an altitude.zip.enc bundle containing the DEM."
+        "DEM not found. Expected vectors/GRC_alt_filled.tif, "
+        "GRC_alt_filled.tif, or an altitude.zip.enc bundle containing the DEM."
     )
 
 
@@ -235,7 +251,7 @@ def ensure_dem():
 # -------------------------------------------------------------------
 
 def download_tsv():
-    print("Downloading TSV from:", TSV_URL)
+    print("Downloading TSV:", TSV_NAME)
 
     resp = requests.get(TSV_URL, headers=HEADERS, timeout=45)
     resp.raise_for_status()
@@ -342,7 +358,11 @@ def fit_linear_regression(X, y):
     y_clean = y[mask]
 
     if X_clean.shape[0] < 5:
-        print("Too few valid points for regression, n = {}. Skipping.".format(X_clean.shape[0]))
+        print(
+            "Too few valid points for regression, n = {}. Skipping.".format(
+                X_clean.shape[0]
+            )
+        )
         return None
 
     beta, _, _, _ = np.linalg.lstsq(X_clean, y_clean, rcond=None)
@@ -428,8 +448,12 @@ def create_species_maps(species, label, ref_date):
         src_nodata = src_dev.nodata
 
     dev_gg, transform_gg, nodata_gg = reproject_to_greek_grid(
-        dev_src, src_transform, src_crs, src_nodata
+        dev_src,
+        src_transform,
+        src_crs,
+        src_nodata
     )
+
     height_gg, width_gg = dev_gg.shape
     extent_gg = raster_extent(transform_gg, width_gg, height_gg)
 
@@ -455,8 +479,10 @@ def create_species_maps(species, label, ref_date):
     )
 
     gdf = gpd.read_file(str(GREECE_GEOJSON))
+
     if gdf.crs is None:
         gdf = gdf.set_crs("EPSG:4326")
+
     gdf_gg = gdf.to_crs(GREEK_GRID_CRS)
 
     transformer_to_lonlat = Transformer.from_crs(
@@ -467,6 +493,7 @@ def create_species_maps(species, label, ref_date):
 
     def setup_axes(title):
         fig, ax = plt.subplots(figsize=(10, 8))
+
         ax.set_xlim(extent_gg[0], extent_gg[1])
         ax.set_ylim(extent_gg[2], extent_gg[3])
         ax.set_aspect("equal", adjustable="box")
@@ -476,8 +503,14 @@ def create_species_maps(species, label, ref_date):
         x_c = 0.5 * (extent_gg[0] + extent_gg[1])
         y_c = 0.5 * (extent_gg[2] + extent_gg[3])
 
-        lons, _ = transformer_to_lonlat.transform(xticks, np.full_like(xticks, y_c))
-        _, lats = transformer_to_lonlat.transform(np.full_like(yticks, x_c), yticks)
+        lons, _ = transformer_to_lonlat.transform(
+            xticks,
+            np.full_like(xticks, y_c)
+        )
+        _, lats = transformer_to_lonlat.transform(
+            np.full_like(yticks, x_c),
+            yticks
+        )
 
         ax.set_xticks(xticks)
         ax.set_xticklabels(["{:.1f}".format(l) for l in lons])
@@ -489,24 +522,34 @@ def create_species_maps(species, label, ref_date):
         ax.set_title(title)
 
         gdf_gg.boundary.plot(ax=ax, linewidth=0.5, color="lightblue")
+
         return fig, ax
 
     def add_full_height_colorbar(fig, ax, mappable, label_text=""):
         divider = make_axes_locatable(ax)
         cax = divider.append_axes("right", size="4%", pad=0.1)
         cbar = fig.colorbar(mappable, cax=cax)
+
         if label_text:
             cbar.set_label(label_text)
+
         return cbar
 
     png_paths = []
 
-    dev_png = OUTPUT_DIR / "{}_dev_good_days_14_{}.png".format(species, ref_date)
+    dev_png = OUTPUT_DIR / "{}_dev_good_days_14_{}.png".format(
+        species,
+        ref_date
+    )
     dev_masked = np.where(dev_gg == nodata_gg, np.nan, dev_gg)
 
     fig, ax = setup_axes(
-        "Ανάπτυξη {}\nΕυνοϊκές ημέρες τελευταίων 14 ημερών ({})".format(label, ref_date)
+        "Ανάπτυξη {}\nΕυνοϊκές ημέρες τελευταίων 14 ημερών ({})".format(
+            label,
+            ref_date
+        )
     )
+
     im = ax.imshow(
         dev_masked,
         origin="upper",
@@ -514,24 +557,34 @@ def create_species_maps(species, label, ref_date):
         vmin=0,
         vmax=14
     )
+
     add_full_height_colorbar(
         fig,
         ax,
         im,
         label_text="Good development days (last 14 days)"
     )
+
     fig.tight_layout(rect=[0.06, 0.06, 0.92, 0.94])
     fig.savefig(str(dev_png), dpi=150)
     plt.close(fig)
+
     print("Wrote", dev_png)
     png_paths.append(dev_png)
 
-    act_png = OUTPUT_DIR / "{}_act_good_days_7_{}.png".format(species, ref_date)
+    act_png = OUTPUT_DIR / "{}_act_good_days_7_{}.png".format(
+        species,
+        ref_date
+    )
     act_masked = np.where(act_gg == act_nodata, np.nan, act_gg)
 
     fig, ax = setup_axes(
-        "Δραστηριότητα {}\nΕυνοϊκές ημέρες τελευταίων 7 ημερών ({})".format(label, ref_date)
+        "Δραστηριότητα {}\nΕυνοϊκές ημέρες τελευταίων 7 ημερών ({})".format(
+            label,
+            ref_date
+        )
     )
+
     im = ax.imshow(
         act_masked,
         origin="upper",
@@ -539,15 +592,18 @@ def create_species_maps(species, label, ref_date):
         vmin=0,
         vmax=7
     )
+
     add_full_height_colorbar(
         fig,
         ax,
         im,
         label_text="Good activity days (last 7 days)"
     )
+
     fig.tight_layout(rect=[0.06, 0.06, 0.92, 0.94])
     fig.savefig(str(act_png), dpi=150)
     plt.close(fig)
+
     print("Wrote", act_png)
     png_paths.append(act_png)
 
@@ -575,6 +631,7 @@ def create_species_maps(species, label, ref_date):
         "#2ca02c",
         "#d62728",
     ]
+
     cmap = ListedColormap(class_colors)
     bounds = [-0.5, 0.5, 1.5, 2.5, 3.5]
     norm = BoundaryNorm(bounds, cmap.N)
@@ -584,6 +641,7 @@ def create_species_maps(species, label, ref_date):
     fig, ax = setup_axes(
         "Κλιματική καταλληλότητα για {} ({})".format(label, ref_date)
     )
+
     im = ax.imshow(
         combined_plot,
         origin="upper",
@@ -591,18 +649,22 @@ def create_species_maps(species, label, ref_date):
         cmap=cmap,
         norm=norm
     )
+
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="4%", pad=0.1)
     cbar = fig.colorbar(im, cax=cax, ticks=[0, 1, 2, 3])
+
     cbar.ax.set_yticklabels([
         "Unfavourable",
         "Dev only",
         "Activity only",
         "Dev + activity"
     ])
+
     fig.tight_layout(rect=[0.06, 0.06, 0.92, 0.94])
     fig.savefig(str(combined_png), dpi=150)
     plt.close(fig)
+
     print("Wrote", combined_png)
     png_paths.append(combined_png)
 
@@ -617,7 +679,7 @@ def ftp_connect():
     ftps = FTP_TLS()
     ftps.connect(FTP_HOST, 21, timeout=60)
     ftps.login(user=FTP_USER, passwd=FTP_PASS)
-    ftps.prot_p)
+    ftps.prot_p()
 
     if FTP_TARGET_DIR not in ("", "/"):
         ftps.cwd(FTP_TARGET_DIR)
@@ -633,6 +695,7 @@ def upload_files_via_ftp(file_paths):
     print("\nUploading PNG maps via FTPS...")
 
     ftps = None
+
     try:
         ftps = ftp_connect()
         print("FTPS session opened.")
@@ -684,13 +747,16 @@ def main():
 
     missing = required_cols.difference(df.columns)
     if missing:
-        raise ValueError("TSV is missing columns: {}".format(", ".join(sorted(missing))))
+        raise ValueError(
+            "TSV is missing columns: {}".format(", ".join(sorted(missing)))
+        )
 
     print("Species found in TSV:", sorted(df["species"].dropna().unique()))
     print("Rows per species:")
     print(df["species"].value_counts(dropna=False))
 
     ref_dates = df["ref_date"].dropna().unique()
+
     if len(ref_dates) == 0:
         raise ValueError("No ref_date values in TSV.")
 
@@ -698,8 +764,14 @@ def main():
     print("Reference date from TSV:", ref_date)
 
     today_ref = ATHENS_NOW.strftime("%Y-%m-%d")
+
     if ref_date != today_ref:
-        print("WARNING: TSV ref_date is {}, but Athens today is {}.".format(ref_date, today_ref))
+        print(
+            "WARNING: TSV ref_date is {}, but Athens today is {}.".format(
+                ref_date,
+                today_ref
+            )
+        )
 
     for col in [
         "dev_index_14",
@@ -737,14 +809,24 @@ def main():
         coord_mask = np.isfinite(lats) & np.isfinite(lons)
 
         if coord_mask.sum() < 5:
-            print("Too few stations with coordinates for {}. Skipping.".format(species))
+            print(
+                "Too few stations with coordinates for {}. Skipping.".format(
+                    species
+                )
+            )
             continue
 
         lats = lats[coord_mask]
         lons = lons[coord_mask]
         df_sp = df_sp.loc[coord_mask].reset_index(drop=True)
 
-        elev_st = sample_dem_at_points(dem_data, transform, nodata, lons, lats)
+        elev_st = sample_dem_at_points(
+            dem_data,
+            transform,
+            nodata,
+            lons,
+            lats
+        )
 
         X_st_base = np.column_stack([
             np.ones_like(elev_st, dtype=np.float32),
@@ -762,6 +844,7 @@ def main():
             y = df_sp[metric_name].values.astype(np.float32)
 
             beta = fit_linear_regression(X_st_base, y)
+
             if beta is None:
                 print(
                     "Skipping metric {} for species {} due to too few points".format(
@@ -779,7 +862,11 @@ def main():
             grid_out = np.full(dem_data.shape, nodata, dtype=np.float32)
             grid_out[grid_rows, grid_cols] = y_grid_flat
 
-            out_name_index = "{}_{}_{}.tif".format(species, metric_suffix, ref_date)
+            out_name_index = "{}_{}_{}.tif".format(
+                species,
+                metric_suffix,
+                ref_date
+            )
             out_path_index = OUTPUT_DIR / out_name_index
             write_raster(out_path_index, grid_out, profile, nodata)
 
@@ -795,7 +882,11 @@ def main():
                 else:
                     gd_suffix = "act_good_days_{}".format(window_days)
 
-                out_name_days = "{}_{}_{}.tif".format(species, gd_suffix, ref_date)
+                out_name_days = "{}_{}_{}.tif".format(
+                    species,
+                    gd_suffix,
+                    ref_date
+                )
                 out_path_days = OUTPUT_DIR / out_name_days
                 write_raster(out_path_days, days_grid, profile, nodata)
 
