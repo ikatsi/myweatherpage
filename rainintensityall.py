@@ -2116,6 +2116,36 @@ EGSA_REGIONS = {
         },
         "footer_version": "v4.2-egsa2100",
     },
+
+    "nwgreece": {
+        "name": "NW Greece",
+        "bbox": (19.36, 23.8, 38.53, 41.2),
+        "prefix": "rain_intensity_nwgreece_",
+        "latest_name": "latestnwgreece.png",
+        "remote_keep": 216,
+        "time_window_min": 45,
+        "grid_n": 300,
+        "idw": {
+            "power": 2,
+            "k": 8,
+            "max_distance_m": 120_000,
+            "distance_mask_m": 170_000,
+        },
+        "snow": {
+            "min_sep_m": 4_500,
+            "max_snowflakes": 5000,
+            "fontsize": 6,
+            "stroke_w": 1.2,
+            "seed": 123,
+        },
+        "labels": {
+            "every_n": 10,
+            "min_sep_m": 12_000,
+            "y_offset_m": 3_000,
+            "fontsize": 6,
+        },
+        "footer_version": "v4.2-egsa2100",
+    },
 }
 
 
@@ -2127,7 +2157,7 @@ def main():
     parser.add_argument(
         "--region",
         default="all",
-        choices=["all", "greece", "attica", "crete", "negreece", "swgreece", "cyprus"],
+        choices=["all", "greece", "attica", "crete", "negreece", "swgreece", "nwgreece", "cyprus"],
         help="Which region to run."
     )
     args = parser.parse_args()
@@ -2147,6 +2177,8 @@ def main():
     if args.region in ("all", "swgreece"):
         run_egsa_region(EGSA_REGIONS["swgreece"])
 
+    if args.region in ("all", "nwgreece"):
+        run_egsa_region(EGSA_REGIONS["nwgreece"])
 
     if args.region in ("all", "cyprus"):
         run_cyprus()
