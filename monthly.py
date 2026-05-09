@@ -108,29 +108,6 @@ REGIONS = [
         "lat_min": 37.5,  "lat_max": 38.7,
         "temp_mode": "egsa"
     },
-    {
-        "key": "negreece",
-        "title": "Υπολογ. σωρευτικός υετός ΒΑ Ελλάδας (τρέχων μήνας)",
-        "outfile": "monthlyppn_negreece.png",
-        "temp_title": "Μέση θερμοκρασία ΒΑ Ελλάδας (τρέχων μήνας, προσαρμογή υψομέτρου)",
-        "temp_outfile": "monthlytavg_negreece.png",
-        "lon_min": 22.0,  "lon_max": 26.6,
-        "lat_min": 39.7,  "lat_max": 41.8,
-        "top_n": 15,
-        "top_loc": "bottom_right",
-        "temp_mode": "egsa"
-    },
-    {
-        "key": "crete",
-        "title": "Υπολογ. σωρευτικός υετός Κρήτης (τρέχων μήνας)",
-        "outfile": "monthlyppn_crete.png",
-        "temp_title": "Μέση θερμοκρασία Κρήτης (τρέχων μήνας, προσαρμογή υψομέτρου)",
-        "temp_outfile": "monthlytavg_crete.png",
-        "lon_min": 23.37, "lon_max": 26.4,
-        "lat_min": 34.7,  "lat_max": 35.78,
-        "top_n": 12,
-        "temp_mode": "egsa"
-    },
 ]
 
 # ======================
