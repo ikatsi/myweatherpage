@@ -2157,8 +2157,8 @@ def main():
     parser.add_argument(
         "--region",
         default="all",
-        choices=["all", "greece", "attica", "crete", "negreece", "swgreece", "nwgreece", "cyprus"],
-        help="Which region to run."
+        choices=["all", "greece", "attica", "cyprus"],
+        help="Which region to run. This version supports Greece, Attica and Cyprus only."
     )
     args = parser.parse_args()
 
@@ -2167,18 +2167,6 @@ def main():
 
     if args.region in ("all", "attica"):
         run_egsa_region(EGSA_REGIONS["attica"])
-
-    if args.region in ("all", "crete"):
-        run_egsa_region(EGSA_REGIONS["crete"])
-
-    if args.region in ("all", "negreece"):
-        run_egsa_region(EGSA_REGIONS["negreece"])
-
-    if args.region in ("all", "swgreece"):
-        run_egsa_region(EGSA_REGIONS["swgreece"])
-
-    if args.region in ("all", "nwgreece"):
-        run_egsa_region(EGSA_REGIONS["nwgreece"])
 
     if args.region in ("all", "cyprus"):
         run_cyprus()
