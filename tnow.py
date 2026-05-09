@@ -2,19 +2,11 @@
 # -*- coding: utf-8 -*-
 # tnow.py
 #
-# Produces 12 files (Attica, NE Greece, NW Greece, SW Greece, Crete, Greece), ALL in ONE folder:  ./Tnowmaps/
+# Produces 4 files (Attica + Greece), ALL in ONE folder: ./Tnowmaps/
 #   1) tnow_attica.png
 #   2) tnow_attica_YYYYMMDD_HHMM.png
-#   3) tnow_negreece.png
-#   4) tnow_negreece_YYYYMMDD_HHMM.png
-#   5) tnow_nwgreece.png
-#   6) tnow_nwgreece_YYYYMMDD_HHMM.png
-#   7) tnow_swgreece.png
-#   8) tnow_swgreece_YYYYMMDD_HHMM.png
-#   9) tnow_crete.png
-#  10) tnow_crete_YYYYMMDD_HHMM.png
-#  11) tnow.png
-#  12) tnow_YYYYMMDD_HHMM.png
+#   3) tnow.png
+#   4) tnow_YYYYMMDD_HHMM.png
 #
 # Attica map is done like
 # - Grid + interpolation + distance masks in EGSA87 (EPSG:2100 meters)
@@ -2098,23 +2090,11 @@ def main():
     # 1) Attica first
     att_main, att_ts = make_tnow_attica_egsa(data, greece, DEM_PATH, athens_now)
 
-    # 2) NE Greece second
-    ne_main, ne_ts = make_tnow_negreece_egsa(data, greece, DEM_PATH, athens_now)
-
-    # 3) NW Greece third
-    nw_main, nw_ts = make_tnow_nwgreece_egsa(data, greece, DEM_PATH, athens_now)
-
-    # 4) SW Greece fourth
-    sw_main, sw_ts = make_tnow_swgreece_egsa(data, greece, DEM_PATH, athens_now)
-
-    # 5) Crete fifth
-    cr_main, cr_ts = make_tnow_crete_egsa(data, greece, DEM_PATH, athens_now)
-
-    # 6) Greece last
+    # 2) Greece last
     gr_main, gr_ts = make_tnow_greece_wgs(data, greece, DEM_PATH, athens_now)
 
     # Upload ONLY the stable filenames, keep timestamped copies local only
-    for p in [att_main, ne_main, nw_main, sw_main, cr_main, gr_main]:
+    for p in [att_main, gr_main]:
         if p and os.path.exists(p):
             try:
                 upload_to_ftp(p)
