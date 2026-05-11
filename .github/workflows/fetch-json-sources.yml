@@ -1,0 +1,27 @@
+name: Fetch and Upload JSON Sources
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fetch-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run fetch_sources.py
+        env:
+          SOURCE_CONFIG_JSON: ${{ secrets.SOURCE_CONFIG_JSON }}
+        run: python fetch_sources.py
