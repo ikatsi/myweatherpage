@@ -367,12 +367,18 @@ def main():
     if not processing_ok:
         print("Processing trigger did not complete successfully.")
 
-    if failed_fetches or failed_uploads or not processing_ok:
+    if failed_uploads or not processing_ok:
         raise RuntimeError(
-            "Run completed with problems: {0} fetch failure(s), {1} upload failure(s), processing_ok={2}.".format(
-                failed_fetches,
+            "Run completed with problems: {0} upload failure(s), processing_ok={1}.".format(
                 failed_uploads,
                 processing_ok
+            )
+        )
+
+    if failed_fetches:
+        print(
+            "Warning: {0} fetch failure(s), but all successfully fetched files were uploaded and processing completed.".format(
+                failed_fetches
             )
         )
 
