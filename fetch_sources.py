@@ -155,6 +155,11 @@ def upload_files_to_ftp(file_paths, ftp_cfg):
     """
     Upload ONLY JSON files created by this script.
 
+    Upload strategy:
+      1) Try passive FTP first.
+      2) If passive mode uploads zero files, try active FTP.
+      3) Reconnect cleanly for the second attempt.
+
     Important:
       - No remote folder is selected.
       - No ftp.cwd() is used.
@@ -195,59 +200,99 @@ def upload_files_to_ftp(file_paths, ftp_cfg):
     if not clean_paths:
         return 0, len(file_paths)
 
-    uploaded = 0
-    failed = 0
+    def try_upload_with_mode(passive_mode):
+        uploaded = 0
+        failed = 0
 
-    ftp = FTP()
+        ftp = FTP()
 
-    try:
-        try:
-            ftp.connect(host, 21, timeout=timeout)
-            ftp.login(user, password)
-            ftp.set_pasv(True)
-        except Exception as e:
-            raise RuntimeError("FTP connection/login failed: {0}".format(repr(e)))
+        mode_name = "passive" if passive_mode else "active"
 
         try:
-            current_dir = ftp.pwd()
-            print("FTP login successful. Current remote directory is available.")
-        except Exception:
-            print("FTP login successful. Could not read current remote directory.")
-
-        for i, local_path in enumerate(clean_paths, start=1):
-            remote_name = os.path.basename(local_path)
-
             try:
-                with open(local_path, "rb") as f:
-                    ftp.storbinary("STOR {0}".format(remote_name), f)
-
-                uploaded += 1
-
+                ftp.connect(host, 21, timeout=timeout)
+                ftp.login(user, password)
+                ftp.set_pasv(passive_mode)
             except Exception as e:
-                failed += 1
-
-                if failed <= 5:
-                    print(
-                        "FTP upload failed for file #{0}/{1}: {2}".format(
-                            i,
-                            len(clean_paths),
-                            repr(e)
-                        )
+                raise RuntimeError(
+                    "FTP connection/login failed in {0} mode: {1}".format(
+                        mode_name,
+                        repr(e)
                     )
+                )
 
-        if failed > 5:
-            print("Additional FTP upload failures suppressed: {0}".format(failed - 5))
-
-    finally:
-        try:
-            ftp.quit()
-        except Exception:
             try:
-                ftp.close()
+                ftp.pwd()
+                print("FTP login successful in {0} mode. Current remote directory is available.".format(
+                    mode_name
+                ))
             except Exception:
-                pass
+                print("FTP login successful in {0} mode. Could not read current remote directory.".format(
+                    mode_name
+                ))
 
-    return uploaded, failed
+            for i, local_path in enumerate(clean_paths, start=1):
+                remote_name = os.path.basename(local_path)
+
+                try:
+                    with open(local_path, "rb") as f:
+                        ftp.storbinary("STOR {0}".format(remote_name), f)
+
+                    uploaded += 1
+
+                except Exception as e:
+                    failed += 1
+
+                    if failed <= 5:
+                        print(
+                            "FTP upload failed in {0} mode for file #{1}/{2}: {3}".format(
+                                mode_name,
+                                i,
+                                len(clean_paths),
+                                repr(e)
+                            )
+                        )
+
+                    # If the first upload times out, the connection is usually broken.
+                    # Stop this mode and let the caller try the next mode.
+                    if uploaded == 0 and failed == 1:
+                        break
+
+            if failed > 5:
+                print("Additional FTP upload failures suppressed in {0} mode: {1}".format(
+                    mode_name,
+                    failed - 5
+                ))
+
+        finally:
+            try:
+                ftp.quit()
+            except Exception:
+                try:
+                    ftp.close()
+                except Exception:
+                    pass
+
+        return uploaded, failed
+
+    # First try passive mode, the usual/default mode for GitHub-hosted runners.
+    uploaded, failed = try_upload_with_mode(True)
+
+    if uploaded > 0:
+        # Count all files not uploaded as failures.
+        total_failed = len(clean_paths) - uploaded
+        return uploaded, total_failed
+
+    print("Passive FTP uploaded 0 files. Trying active FTP mode...")
+
+    uploaded2, failed2 = try_upload_with_mode(False)
+
+    if uploaded2 > 0:
+        total_failed = len(clean_paths) - uploaded2
+        return uploaded2, total_failed
+
+    # Both modes uploaded zero files.
+    return 0, len(clean_paths)
 
 
 # -------------------------------------------------------------------
