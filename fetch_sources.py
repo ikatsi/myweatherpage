@@ -161,6 +161,7 @@ def upload_files_to_ftp(file_paths, ftp_cfg):
       - Files are uploaded directly into the FTP login directory.
       - Filenames are not printed.
       - Non-JSON files are skipped.
+      - FTP errors are printed without filenames.
     """
 
     host = ftp_cfg.get("host", "")
@@ -200,11 +201,20 @@ def upload_files_to_ftp(file_paths, ftp_cfg):
     ftp = FTP()
 
     try:
-        ftp.connect(host, 21, timeout=timeout)
-        ftp.login(user, password)
-        ftp.set_pasv(True)
+        try:
+            ftp.connect(host, 21, timeout=timeout)
+            ftp.login(user, password)
+            ftp.set_pasv(True)
+        except Exception as e:
+            raise RuntimeError("FTP connection/login failed: {0}".format(repr(e)))
 
-        for local_path in clean_paths:
+        try:
+            current_dir = ftp.pwd()
+            print("FTP login successful. Current remote directory is available.")
+        except Exception:
+            print("FTP login successful. Could not read current remote directory.")
+
+        for i, local_path in enumerate(clean_paths, start=1):
             remote_name = os.path.basename(local_path)
 
             try:
@@ -213,8 +223,20 @@ def upload_files_to_ftp(file_paths, ftp_cfg):
 
                 uploaded += 1
 
-            except Exception:
+            except Exception as e:
                 failed += 1
+
+                if failed <= 5:
+                    print(
+                        "FTP upload failed for file #{0}/{1}: {2}".format(
+                            i,
+                            len(clean_paths),
+                            repr(e)
+                        )
+                    )
+
+        if failed > 5:
+            print("Additional FTP upload failures suppressed: {0}".format(failed - 5))
 
     finally:
         try:
@@ -367,9 +389,10 @@ def main():
     if not processing_ok:
         print("Processing trigger did not complete successfully.")
 
-    if failed_uploads or not processing_ok:
+    if uploaded <= 0 or failed_uploads or not processing_ok:
         raise RuntimeError(
-            "Run completed with problems: {0} upload failure(s), processing_ok={1}.".format(
+            "Run completed with problems: uploaded={0}, upload failure(s)={1}, processing_ok={2}.".format(
+                uploaded,
                 failed_uploads,
                 processing_ok
             )
