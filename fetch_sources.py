@@ -134,10 +134,15 @@ def configure_ssl_warning_behavior(verify_ssl):
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
-def fetch_one(url, headers, verify_ssl, timeout_connect, timeout_read):
+def fetch_one(url, headers, verify_ssl, timeout_connect, timeout_read, api_token):
+    request_headers = dict(headers)
+
+    if api_token:
+        request_headers["Authorization"] = "Bearer {0}".format(api_token)
+
     response = requests.get(
         url,
-        headers=headers,
+        headers=request_headers,
         verify=verify_ssl,
         timeout=(timeout_connect, timeout_read)
     )
@@ -153,26 +158,19 @@ def fetch_one(url, headers, verify_ssl, timeout_connect, timeout_read):
 
 def upload_files_to_ftp(file_paths, ftp_cfg):
     """
-    Upload ONLY JSON files created by this script.
+    Upload ONLY JSON files created by this script by FTP.
 
-    Upload strategy:
-      1) Try passive FTP first.
-      2) If passive mode uploads zero files, try active FTP.
-      3) Reconnect cleanly for the second attempt.
+    Files are uploaded to the FTP login directory unless ftp.remote_dir is set
+    in SOURCE_CONFIG_JSON.
 
-    Important:
-      - No remote folder is selected.
-      - No ftp.cwd() is used.
-      - Files are uploaded directly into the FTP login directory.
-      - Filenames are not printed.
-      - Non-JSON files are skipped.
-      - FTP errors are printed without filenames.
+    No server-side processing is triggered here.
     """
 
     host = ftp_cfg.get("host", "")
     user = ftp_cfg.get("user", "")
     password = ftp_cfg.get("pass", "")
     timeout = int(ftp_cfg.get("timeout", 60))
+    remote_dir = ftp_cfg.get("remote_dir", "")
 
     if not host:
         raise RuntimeError("FTP host is missing.")
@@ -200,99 +198,53 @@ def upload_files_to_ftp(file_paths, ftp_cfg):
     if not clean_paths:
         return 0, len(file_paths)
 
-    def try_upload_with_mode(passive_mode):
-        uploaded = 0
-        failed = 0
+    uploaded = 0
+    failed = 0
 
-        ftp = FTP()
+    ftp = FTP()
 
-        mode_name = "passive" if passive_mode else "active"
+    try:
+        ftp.connect(host, 21, timeout=timeout)
+        ftp.login(user, password)
+        ftp.set_pasv(True)
 
-        try:
+        if remote_dir:
+            ftp.cwd(remote_dir)
+
+        for i, local_path in enumerate(clean_paths, start=1):
+            remote_name = os.path.basename(local_path)
+
             try:
-                ftp.connect(host, 21, timeout=timeout)
-                ftp.login(user, password)
-                ftp.set_pasv(passive_mode)
+                with open(local_path, "rb") as f:
+                    ftp.storbinary("STOR {0}".format(remote_name), f)
+
+                uploaded += 1
+
             except Exception as e:
-                raise RuntimeError(
-                    "FTP connection/login failed in {0} mode: {1}".format(
-                        mode_name,
-                        repr(e)
-                    )
-                )
+                failed += 1
 
-            try:
-                ftp.pwd()
-                print("FTP login successful in {0} mode. Current remote directory is available.".format(
-                    mode_name
-                ))
-            except Exception:
-                print("FTP login successful in {0} mode. Could not read current remote directory.".format(
-                    mode_name
-                ))
-
-            for i, local_path in enumerate(clean_paths, start=1):
-                remote_name = os.path.basename(local_path)
-
-                try:
-                    with open(local_path, "rb") as f:
-                        ftp.storbinary("STOR {0}".format(remote_name), f)
-
-                    uploaded += 1
-
-                except Exception as e:
-                    failed += 1
-
-                    if failed <= 5:
-                        print(
-                            "FTP upload failed in {0} mode for file #{1}/{2}: {3}".format(
-                                mode_name,
-                                i,
-                                len(clean_paths),
-                                repr(e)
-                            )
+                if failed <= 5:
+                    print(
+                        "FTP upload failed for file #{0}/{1}: {2}".format(
+                            i,
+                            len(clean_paths),
+                            repr(e)
                         )
+                    )
 
-                    # If the first upload times out, the connection is usually broken.
-                    # Stop this mode and let the caller try the next mode.
-                    if uploaded == 0 and failed == 1:
-                        break
+        if failed > 5:
+            print("Additional FTP upload failures suppressed: {0}".format(failed - 5))
 
-            if failed > 5:
-                print("Additional FTP upload failures suppressed in {0} mode: {1}".format(
-                    mode_name,
-                    failed - 5
-                ))
-
-        finally:
+    finally:
+        try:
+            ftp.quit()
+        except Exception:
             try:
-                ftp.quit()
+                ftp.close()
             except Exception:
-                try:
-                    ftp.close()
-                except Exception:
-                    pass
+                pass
 
-        return uploaded, failed
-
-    # First try passive mode, the usual/default mode for GitHub-hosted runners.
-    uploaded, failed = try_upload_with_mode(True)
-
-    if uploaded > 0:
-        # Count all files not uploaded as failures.
-        total_failed = len(clean_paths) - uploaded
-        return uploaded, total_failed
-
-    print("Passive FTP uploaded 0 files. Trying active FTP mode...")
-
-    uploaded2, failed2 = try_upload_with_mode(False)
-
-    if uploaded2 > 0:
-        total_failed = len(clean_paths) - uploaded2
-        return uploaded2, total_failed
-
-    # Both modes uploaded zero files.
-    return 0, len(clean_paths)
+    return uploaded, failed
 
 
 # -------------------------------------------------------------------
@@ -352,9 +304,13 @@ def trigger_processing(processing_cfg):
 def main():
     cfg = load_config()
 
+    api_token = os.environ.get("API_TOKEN", "")
+
+    if api_token:
+        mask_value(api_token)
+
     ftp_cfg = cfg["ftp"]
     sources = cfg["sources"]
-
     fetch_cfg = cfg.get("fetch", {})
     fetch_headers = fetch_cfg.get("headers", {})
 
@@ -386,7 +342,8 @@ def main():
                 headers=fetch_headers,
                 verify_ssl=verify_ssl,
                 timeout_connect=timeout_connect,
-                timeout_read=timeout_read
+                timeout_read=timeout_read,
+                api_token=api_token
             )
 
             path = save_file(
