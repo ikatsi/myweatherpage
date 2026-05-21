@@ -17,8 +17,6 @@ import urllib3
 def mask_value(value):
     """
     Ask GitHub Actions to mask a value in logs.
-
-    This helps prevent accidental leakage if a value is ever printed.
     """
     if value is None:
         return
@@ -32,26 +30,15 @@ def mask_value(value):
 def mask_config(cfg):
     """
     Mask all sensitive values contained in the config.
-
-    This includes:
-      - FTP credentials
-      - processing URL and secret
-      - fetch headers
-      - source filenames
-      - source URLs
     """
 
     ftp_cfg = cfg.get("ftp", {})
-    processing_cfg = cfg.get("processing", {})
     fetch_cfg = cfg.get("fetch", {})
     fetch_headers = fetch_cfg.get("headers", {})
     sources = cfg.get("sources", [])
 
-    for key in ["host", "user", "pass"]:
+    for key in ["host", "user", "pass", "remote_dir"]:
         mask_value(ftp_cfg.get(key, ""))
-
-    for key in ["url", "secret"]:
-        mask_value(processing_cfg.get(key, ""))
 
     for _, value in fetch_headers.items():
         mask_value(value)
@@ -162,8 +149,6 @@ def upload_files_to_ftp(file_paths, ftp_cfg):
 
     Files are uploaded to the FTP login directory unless ftp.remote_dir is set
     in SOURCE_CONFIG_JSON.
-
-    No server-side processing is triggered here.
     """
 
     host = ftp_cfg.get("host", "")
@@ -248,56 +233,6 @@ def upload_files_to_ftp(file_paths, ftp_cfg):
 
 
 # -------------------------------------------------------------------
-# OPTIONAL PROCESSING TRIGGER
-# -------------------------------------------------------------------
-
-def trigger_processing(processing_cfg):
-    """
-    Optionally call a server-side processing endpoint.
-
-    This is disabled unless processing.enabled is true in SOURCE_CONFIG_JSON.
-    No sensitive URL or response body is printed.
-    """
-
-    enabled = bool(processing_cfg.get("enabled", False))
-
-    if not enabled:
-        return True
-
-    url = processing_cfg.get("url", "")
-    secret = processing_cfg.get("secret", "")
-
-    if not url:
-        raise RuntimeError("Processing is enabled but processing URL is missing.")
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-    }
-
-    if secret:
-        headers["X-Auth-Secret"] = secret
-
-    try:
-        response = requests.post(
-            url,
-            params={"action": "process"},
-            headers=headers,
-            timeout=120,
-        )
-
-        if response.status_code >= 400:
-            print("Processing trigger failed with HTTP {0}.".format(response.status_code))
-            return False
-
-        print("Processing trigger completed with HTTP {0}.".format(response.status_code))
-        return True
-
-    except Exception:
-        print("Processing trigger failed.")
-        return False
-
-
-# -------------------------------------------------------------------
 # MAIN
 # -------------------------------------------------------------------
 
@@ -311,14 +246,13 @@ def main():
 
     ftp_cfg = cfg["ftp"]
     sources = cfg["sources"]
+
     fetch_cfg = cfg.get("fetch", {})
     fetch_headers = fetch_cfg.get("headers", {})
 
     verify_ssl = bool(fetch_cfg.get("verify_ssl", True))
     timeout_connect = int(fetch_cfg.get("timeout_connect", 10))
     timeout_read = int(fetch_cfg.get("timeout_read", 30))
-
-    processing_cfg = cfg.get("processing", {})
 
     configure_ssl_warning_behavior(verify_ssl)
 
@@ -377,32 +311,23 @@ def main():
         len(created_files)
     ))
 
-    processing_ok = True
-
-    if uploaded > 0:
-        processing_ok = trigger_processing(processing_cfg)
-
     if failed_fetches:
         print("Fetch failures: {0}".format(failed_fetches))
 
     if failed_uploads:
         print("FTP upload failures: {0}".format(failed_uploads))
 
-    if not processing_ok:
-        print("Processing trigger did not complete successfully.")
-
-    if uploaded <= 0 or failed_uploads or not processing_ok:
+    if uploaded <= 0 or failed_uploads:
         raise RuntimeError(
-            "Run completed with problems: uploaded={0}, upload failure(s)={1}, processing_ok={2}.".format(
+            "Run completed with problems: uploaded={0}, upload failure(s)={1}.".format(
                 uploaded,
-                failed_uploads,
-                processing_ok
+                failed_uploads
             )
         )
 
     if failed_fetches:
         print(
-            "Warning: {0} fetch failure(s), but all successfully fetched files were uploaded and processing completed.".format(
+            "Warning: {0} fetch failure(s), but all successfully fetched files were uploaded.".format(
                 failed_fetches
             )
         )
