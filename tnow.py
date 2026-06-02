@@ -522,10 +522,10 @@ def add_top10_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
             txt = ax.text(
                 lon, lat, str(rank),
                 ha="center", va="center",
-                fontsize=9, fontweight="bold",
+                fontsize=8, fontweight="normal",
                 color=color, zorder=13
             )
-            txt.set_path_effects([pe.withStroke(linewidth=2.8, foreground="white")])
+            txt.set_path_effects([pe.withStroke(linewidth=2.0, foreground="white")])
             rank += 1
             if rank > 10:
                 break
