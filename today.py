@@ -96,6 +96,11 @@ GRID_LON_MIN, GRID_LON_MAX = 19.0, 30.0
 GRID_LAT_MIN, GRID_LAT_MAX = 34.5, 42.5
 GRID_N = 300
 
+# Fixed rasterized Greek land area for the 300 x 300 national grid.
+# Calculated once from the same greece.geojson boundary and latitude-weighted
+# grid-cell areas. Used as the denominator for national territorial percentages.
+GREECE_RASTERIZED_LAND_AREA_KM2 = 131595.026512276
+
 # Regional bboxes from tnow.py
 AT_LON_MIN, AT_LON_MAX = 22.7, 25.0
 AT_LAT_MIN, AT_LAT_MAX = 37.5, 38.7
@@ -559,6 +564,20 @@ def build_distance_mask(grid_x, grid_y, st_lons, st_lats, max_deg=1.5) -> np.nda
     return distances.reshape(grid_x.shape) <= max_deg
 
 
+def build_latitude_weighted_cell_area_km2(grid_y) -> np.ndarray:
+    """Approximate surface area of each lon/lat grid cell in square kilometres."""
+    earth_radius_km = 6371.0088
+    dlon_rad = np.deg2rad((GRID_LON_MAX - GRID_LON_MIN) / max(GRID_N - 1, 1))
+    dlat_rad = np.deg2rad((GRID_LAT_MAX - GRID_LAT_MIN) / max(GRID_N - 1, 1))
+
+    return (
+        (earth_radius_km ** 2)
+        * dlon_rad
+        * dlat_rad
+        * np.cos(np.deg2rad(grid_y))
+    )
+
+
 def estimate_local_lapse_rates(st_lons, st_lats, st_temp, st_elev,
                                k=12, max_deg=1.2,
                                default_lapse=LAPSE_DEFAULT,
@@ -787,21 +806,78 @@ def draw_rank_markers(ax, df5: pd.DataFrame, lon_col="Longitude", lat_col="Latit
             lon = float(r[lon_col])
             lat = float(r[lat_col])
 
-            ax.scatter([lon], [lat], s=90, facecolors="none", edgecolors="black",
+            ax.scatter([lon], [lat], s=70, facecolors="none", edgecolors="black",
                        linewidths=1.2, zorder=12)
 
             t = ax.text(lon, lat, str(rank), ha="center", va="center",
-                        fontsize=12, fontweight="bold", color="black", zorder=13)
-            t.set_path_effects([pe.withStroke(linewidth=2.5, foreground="white")])
+                        fontsize=9, color="black", zorder=13)
+            t.set_path_effects([pe.withStroke(linewidth=2.0, foreground="white")])
         except Exception:
             continue
 
 
-def add_temp_contours_wgs(ax, grid_x, grid_y, field):
+def add_temp_contours_wgs(ax, grid_x, grid_y, field, special_levels=None):
+    """
+    Draw ordinary 3°C contours plus thicker threshold contours.
+    Labels are small and forced to remain horizontal.
+    """
+    if special_levels is None:
+        special_levels = []
+
+    levels = np.arange(-30, 49, 3, dtype=float)
+    thin_levels = [
+        lv for lv in levels
+        if not any(np.isclose(lv, special) for special in special_levels)
+    ]
+
+    cs_thin = None
+    cs_special = None
+
     try:
-        ax.contour(grid_x, grid_y, field, levels=[0.0], colors="black", linewidths=1.2)
+        cs_thin = ax.contour(
+            grid_x, grid_y, field,
+            levels=thin_levels,
+            colors="black",
+            linewidths=0.6,
+            alpha=0.70
+        )
     except Exception:
-        pass
+        cs_thin = None
+
+    try:
+        if special_levels:
+            cs_special = ax.contour(
+                grid_x, grid_y, field,
+                levels=special_levels,
+                colors="black",
+                linewidths=1.3,
+                alpha=0.95
+            )
+    except Exception:
+        cs_special = None
+
+    for cs in [cs_thin, cs_special]:
+        if cs is None:
+            continue
+
+        try:
+            texts = ax.clabel(
+                cs,
+                levels=cs.levels[:],
+                inline=True,
+                inline_spacing=2,
+                fmt="%d",
+                fontsize=6
+            )
+
+            for t in texts:
+                t.set_rotation(0)
+                t.set_rotation_mode("anchor")
+                t.set_path_effects([
+                    pe.withStroke(linewidth=1.8, foreground="white")
+                ])
+        except Exception:
+            pass
 
 
 def add_temp_contours_egsa(ax, grid_x, grid_y, field):
@@ -981,7 +1057,8 @@ def prepare_temp_data(today_data: pd.DataFrame, on_date) -> pd.DataFrame:
 # =========================
 # NATIONAL MAPS
 # =========================
-def make_todayrain_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir, athens_now):
+def make_todayrain_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
+                                cell_area_km2, out_dir, athens_now):
     if "TodayRain" not in df.columns:
         print("❌ TodayRain missing.")
         return (None, None)
@@ -1009,6 +1086,17 @@ def make_todayrain_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_di
 
     out = np.full(grid_x.shape, np.nan)
     out[final_mask] = grid_val[final_mask]
+
+    mapped_mask = final_mask & np.isfinite(out)
+    mapped_area_km2 = float(np.sum(cell_area_km2[mapped_mask]))
+    coverage_pct = 100.0 * mapped_area_km2 / GREECE_RASTERIZED_LAND_AREA_KM2
+
+    rain_area_mask = mapped_mask & (out >= 0.1)
+    rain_area_km2 = float(np.sum(cell_area_km2[rain_area_mask]))
+    rain_area_pct = 100.0 * rain_area_km2 / GREECE_RASTERIZED_LAND_AREA_KM2
+
+    print(f"ℹ️ National rain-map coverage: {mapped_area_km2:,.0f} km² ({coverage_pct:.1f}% of Greece)")
+    print(f"ℹ️ Area with precipitation >=0.1 mm: {rain_area_pct:.1f}% of Greece")
 
     cmap, norm, bounds = rain_cmap_norm()
 
@@ -1038,6 +1126,21 @@ def make_todayrain_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_di
     ax.set_title("Υπολογισμ. σωρευτικός υετός (από τα μεσάνυχτα)", fontsize=16)
     ax.set_xlabel("Γεωγρ. μήκος", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
+
+    rain_text = (
+        "Ποσοστό έκτασης επικράτειας\n"
+        "με καταγεγραμμένο υετό ≥0,1 mm:\n"
+        f"{rain_area_pct:.1f}%"
+    )
+    ax.text(
+        0.01, 0.985, rain_text,
+        transform=ax.transAxes,
+        ha="left", va="top",
+        fontsize=8.2,
+        color="black",
+        bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.2"),
+        path_effects=[pe.withStroke(linewidth=2.4, foreground="white")]
+    )
 
     ax.text(
         0.01, 0.01, stamp_text(athens_now),
@@ -1083,8 +1186,9 @@ def make_todayrain_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_di
     return main_path, None
 
 
-def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir,
-                           athens_now, dem_path, var_col, stable_name, title, box_title, sort_ascending):
+def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
+                           grid_elev, cell_area_km2, out_dir, athens_now, dem_path,
+                           var_col, stable_name, title, box_title, sort_ascending):
     if var_col not in df.columns:
         print(f"❌ {var_col} missing.")
         return (None, None)
@@ -1132,7 +1236,6 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir,
     lapse_grid = idw_fast(st_lons, st_lats, st_lapse, grid_x, grid_y, k=8, power=2,
                           max_distance=1.2, min_neighbors=3)
 
-    grid_elev = sample_dem_robust(grid_x.ravel(), grid_y.ravel(), dem_path).reshape(grid_x.shape)
     temp_grid = t0_grid + (lapse_grid * grid_elev)
 
     dist_mask = build_distance_mask(grid_x, grid_y, st_lons, st_lats, max_deg=1.5)
@@ -1140,6 +1243,54 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir,
 
     out = np.full(grid_x.shape, np.nan)
     out[final_mask] = temp_grid[final_mask]
+
+    interp_min = None
+    interp_max = None
+    try:
+        if np.any(np.isfinite(out)):
+            interp_min = float(np.nanmin(out))
+            interp_max = float(np.nanmax(out))
+    except Exception:
+        interp_min, interp_max = None, None
+
+    mapped_mask = final_mask & np.isfinite(out)
+    mapped_area_km2 = float(np.sum(cell_area_km2[mapped_mask]))
+    coverage_pct = 100.0 * mapped_area_km2 / GREECE_RASTERIZED_LAND_AREA_KM2
+
+    def pct_area_above(threshold_c: float) -> float:
+        threshold_mask = mapped_mask & (out > threshold_c)
+        area_km2 = float(np.sum(cell_area_km2[threshold_mask]))
+        return 100.0 * area_km2 / GREECE_RASTERIZED_LAND_AREA_KM2
+
+    def pct_area_below(threshold_c: float) -> float:
+        threshold_mask = mapped_mask & (out < threshold_c)
+        area_km2 = float(np.sum(cell_area_km2[threshold_mask]))
+        return 100.0 * area_km2 / GREECE_RASTERIZED_LAND_AREA_KM2
+
+    if var_col == "TMin":
+        pct_below_0 = pct_area_below(0.0)
+        special_levels = [0.0]
+        stats_text = (
+            "Ποσοστό έκτασης επικράτειας:\n"
+            f"<0°C: {pct_below_0:.1f}%"
+        )
+        print(f"ℹ️ {var_col} area <0°C: {pct_below_0:.1f}% of Greece")
+    else:
+        pct_above_30 = pct_area_above(30.0)
+        pct_above_37 = pct_area_above(37.0)
+        pct_above_40 = pct_area_above(40.0)
+        special_levels = [30.0, 37.0, 40.0]
+        stats_text = (
+            "Ποσοστό έκτασης επικράτειας:\n"
+            f">30°C: {pct_above_30:.1f}%\n"
+            f">37°C: {pct_above_37:.1f}%\n"
+            f">40°C: {pct_above_40:.1f}%"
+        )
+        print(f"ℹ️ {var_col} area >30°C: {pct_above_30:.1f}% of Greece")
+        print(f"ℹ️ {var_col} area >37°C: {pct_above_37:.1f}% of Greece")
+        print(f"ℹ️ {var_col} area >40°C: {pct_above_40:.1f}% of Greece")
+
+    print(f"ℹ️ {var_col} interpolation coverage: {mapped_area_km2:,.0f} km² ({coverage_pct:.1f}% of Greece)")
 
     fig, ax = plt.subplots(figsize=(12, 8))
     img = ax.imshow(
@@ -1152,12 +1303,28 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir,
     )
 
     greece_gdf.boundary.plot(ax=ax, color="black", linewidth=0.6)
-    add_temp_contours_wgs(ax, grid_x, grid_y, out)
+    add_temp_contours_wgs(ax, grid_x, grid_y, out, special_levels=special_levels)
     temp_colorbar_national(ax, img)
 
     ax.set_title(title, fontsize=16)
     ax.set_xlabel("Γεωγρ. μήκος", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
+
+    if interp_min is not None and interp_max is not None:
+        left_text = (
+            "Εύρος παρεμβολής (ξηρά):\n"
+            f"{interp_min:.1f} έως {interp_max:.1f}°C\n\n"
+            + stats_text
+        )
+        ax.text(
+            0.01, 0.985, left_text,
+            transform=ax.transAxes,
+            ha="left", va="top",
+            fontsize=8.2,
+            color="black",
+            bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.2"),
+            path_effects=[pe.withStroke(linewidth=2.4, foreground="white")]
+        )
 
     ax.text(
         0.01, 0.01, stamp_text(athens_now),
@@ -1173,7 +1340,7 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask, out_dir,
         nm = shorten_for_box(r["__name"], max_chars=TOPBOX_NAME_MAX)
         val_txt = f"{float(r[var_col]):.1f}".replace(".", ",")
         lines.append(f"{rank}. {nm}: {val_txt}°C")
-        
+
     add_top5_box(ax, box_title, lines, x0=0.99, y0=0.98, font_size=8.2, two_col_font_size=8.2, force_one_col=True)
     draw_rank_markers(ax, rank_df, lon_col="Longitude", lat_col="Latitude")
 
@@ -1521,12 +1688,20 @@ def main():
     )
     geo_mask = build_geo_mask(grid_x, grid_y, greece)
 
-    
+    # National static grids, calculated once and reused by all three maps.
+    grid_elev = sample_dem_robust(
+        grid_x.ravel(),
+        grid_y.ravel(),
+        DEM_PATH
+    ).reshape(grid_x.shape)
+    cell_area_km2 = build_latitude_weighted_cell_area_km2(grid_y)
+
     # -------- Rain --------
     rain_input = prepare_rain_data(today_data, athens_now.date())
     rain_dir = os.path.join(BASE_DIR, "TodayRainMaps")
     rain_main, _ = make_todayrain_map_national(
-        rain_input, greece, grid_x, grid_y, geo_mask, rain_dir, athens_now
+        rain_input, greece, grid_x, grid_y, geo_mask,
+        cell_area_km2, rain_dir, athens_now
     )
 
     # -------- Temperature-family input (for both Tmin and Tmax) --------
@@ -1535,8 +1710,8 @@ def main():
     # -------- Tmin --------
     tmin_dir = os.path.join(BASE_DIR, "TminMaps")
     tmin_main, _ = make_temp_map_national(
-        temp_input, greece, grid_x, grid_y, geo_mask, tmin_dir,
-        athens_now, DEM_PATH,
+        temp_input, greece, grid_x, grid_y, geo_mask,
+        grid_elev, cell_area_km2, tmin_dir, athens_now, DEM_PATH,
         var_col="TMin",
         stable_name="tmin.png",
         title="Ελάχιστη θερμοκρασία (προσαρμογή υψομέτρου)",
@@ -1550,8 +1725,8 @@ def main():
     tmax_dir = os.path.join(BASE_DIR, "TmaxMaps")
 
     tmax_main, _ = make_temp_map_national(
-        tmax_input, greece, grid_x, grid_y, geo_mask, tmax_dir,
-        athens_now, DEM_PATH,
+        tmax_input, greece, grid_x, grid_y, geo_mask,
+        grid_elev, cell_area_km2, tmax_dir, athens_now, DEM_PATH,
         var_col="TMax",
         stable_name="tmax.png",
         title="Μέγιστη θερμοκρασία (προσαρμογή υψομέτρου)",
