@@ -51,7 +51,6 @@ from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 
 from scipy.spatial import cKDTree
-from scipy.ndimage import gaussian_filter
 
 import requests
 import rasterio
@@ -80,6 +79,11 @@ OUT_DIR = os.path.join(BASE_DIR, "Tnowmaps")
 GR_LON_MIN, GR_LON_MAX = 19.0, 30.0
 GR_LAT_MIN, GR_LAT_MAX = 34.5, 42.5
 GR_N = 300
+
+# Fixed rasterized Greek land area for the 300 x 300 national grid.
+# Calculated once from the same greece.geojson boundary and latitude-weighted
+# grid-cell areas. It is used as the denominator for national area percentages.
+GREECE_RASTERIZED_LAND_AREA_KM2 = 131595.026512276
 
 # --- Attica bbox: EXACTLY like your rain Attica script ---
 AT_LON_MIN, AT_LON_MAX = 22.7, 25.0
@@ -162,7 +166,7 @@ def ensure_altitude_bundle():
 
 
 
-# ---------- TOP-5 BOX formatting (shared via common_abbrev.py) ----------
+# ---------- TOP-10 BOX formatting (shared via common_abbrev.py) ----------
 TOPBOX_NAME_MAX = 26
 
 
@@ -399,99 +403,6 @@ def idw_fast(x, y, z, xi, yi, k=8, power=2, max_distance=1.0, min_neighbors=3):
     zi[ok_pts] = zi_ok[ok_pts]
     return zi.reshape(xi.shape)
 
-def max_adjusted_neighbors_wgs(st_lons, st_lats, st_temp, st_elev, st_lapse,
-                               grid_x, grid_y, grid_elev,
-                               k=8, max_deg=1.2, min_neighbors=3):
-    """
-    For each grid cell, take MAX over nearby stations of:
-      T_i + lapse_i * (z_cell - z_i)
-
-    This is an "upper envelope" field, not a mean estimator.
-    Can exceed observed station maxima (especially downslope).
-    """
-    st_lons = np.asarray(st_lons, dtype=float)
-    st_lats = np.asarray(st_lats, dtype=float)
-    st_temp = np.asarray(st_temp, dtype=float)
-    st_elev = np.asarray(st_elev, dtype=float)
-    st_lapse = np.asarray(st_lapse, dtype=float)
-
-    tree = cKDTree(np.c_[st_lons, st_lats])
-
-    pts = np.c_[grid_x.ravel(), grid_y.ravel()]
-    dist, idx = tree.query(pts, k=min(k, len(st_temp)), distance_upper_bound=max_deg)
-
-    if dist.ndim == 1:
-        dist = dist[:, None]
-        idx = idx[:, None]
-
-    finite = np.isfinite(dist) & (idx < len(st_temp))
-    neigh_count = np.sum(finite, axis=1)
-
-    out = np.full(grid_x.size, np.nan, dtype=float)
-    ok_pts = neigh_count >= min_neighbors
-    if not np.any(ok_pts):
-        return out.reshape(grid_x.shape)
-
-    idx_safe = np.where(finite, idx, 0)
-
-    # expand grid elevation to match neighbors
-    zc = grid_elev.ravel()[:, None]
-    ti = st_temp[idx_safe]
-    zi = st_elev[idx_safe]
-    li = st_lapse[idx_safe]
-
-    t_adj = ti + li * (zc - zi)
-    t_adj = np.where(finite, t_adj, np.nan)
-
-    out[ok_pts] = np.nanmax(t_adj[ok_pts], axis=1)
-    return out.reshape(grid_x.shape)
-
-def min_adjusted_neighbors_wgs(st_lons, st_lats, st_temp, st_elev, st_lapse,
-                               grid_x, grid_y, grid_elev,
-                               k=8, max_deg=1.2, min_neighbors=3):
-    """
-    For each grid cell, take MIN over nearby stations of:
-      T_i + lapse_i * (z_cell - z_i)
-
-    This is a "lower envelope" field, not a mean estimator.
-    Can be colder than observed station minima (especially if inversions/cold pools are plausible).
-    """
-    st_lons = np.asarray(st_lons, dtype=float)
-    st_lats = np.asarray(st_lats, dtype=float)
-    st_temp = np.asarray(st_temp, dtype=float)
-    st_elev = np.asarray(st_elev, dtype=float)
-    st_lapse = np.asarray(st_lapse, dtype=float)
-
-    tree = cKDTree(np.c_[st_lons, st_lats])
-
-    pts = np.c_[grid_x.ravel(), grid_y.ravel()]
-    dist, idx = tree.query(pts, k=min(k, len(st_temp)), distance_upper_bound=max_deg)
-
-    if dist.ndim == 1:
-        dist = dist[:, None]
-        idx = idx[:, None]
-
-    finite = np.isfinite(dist) & (idx < len(st_temp))
-    neigh_count = np.sum(finite, axis=1)
-
-    out = np.full(grid_x.size, np.nan, dtype=float)
-    ok_pts = neigh_count >= min_neighbors
-    if not np.any(ok_pts):
-        return out.reshape(grid_x.shape)
-
-    idx_safe = np.where(finite, idx, 0)
-
-    zc = grid_elev.ravel()[:, None]
-    ti = st_temp[idx_safe]
-    zi = st_elev[idx_safe]
-    li = st_lapse[idx_safe]
-
-    t_adj = ti + li * (zc - zi)
-    t_adj = np.where(finite, t_adj, np.nan)
-
-    out[ok_pts] = np.nanmin(t_adj[ok_pts], axis=1)
-    return out.reshape(grid_x.shape)
-
 # =========================
 # DEM SAMPLING (lon/lat arrays)
 # =========================
@@ -534,11 +445,11 @@ def pick_station_label_column(df: pd.DataFrame) -> str:
     return "webcode"
 
 
-def add_top5_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
+def add_top10_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
     """
-    Transparent top-right info + map markers (1..5).
-    - Cold 5: blue numbers
-    - Hot 5: red numbers
+    Transparent top-right info + map markers (1..10).
+    - Cold 10: blue numbers
+    - Hot 10: red numbers
     """
     if tt0 is None or tt0.empty:
         return
@@ -556,8 +467,8 @@ def add_top5_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
     if label_col not in tmp.columns:
         tmp[label_col] = "station"
 
-    cold5 = tmp.nsmallest(5, "TNow").copy()
-    hot5  = tmp.nlargest(5, "TNow").copy()
+    cold10 = tmp.nsmallest(10, "TNow").copy()
+    hot10  = tmp.nlargest(10, "TNow").copy()
 
     # ---- build text block (shortened names with today.py abbreviations)
     def fmt_block(dfx: pd.DataFrame, title: str) -> str:
@@ -573,7 +484,11 @@ def add_top5_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
             i += 1
         return "\n".join(lines)
 
-    box_text = fmt_block(cold5, "Ψυχρότερες 5 περιοχές") + "\n\n" + fmt_block(hot5, "Θερμότερες 5 περιοχές")
+    box_text = (
+        fmt_block(cold10, "Ψυχρότερες 10 περιοχές")
+        + "\n\n"
+        + fmt_block(hot10, "Θερμότερες 10 περιοχές")
+    )
 
     # ---- add frost line (only when provided)
     if frost_text:
@@ -584,13 +499,13 @@ def add_top5_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
         0.99, 0.99, box_text,
         transform=ax.transAxes,
         ha="right", va="top",
-        fontsize=10,
+        fontsize=8.2,
         color="black",
-        bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.35"),
-        path_effects=[pe.withStroke(linewidth=3.0, foreground="white")]
+        bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.25"),
+        path_effects=[pe.withStroke(linewidth=2.5, foreground="white")]
     )
 
-    # ---- draw map markers 1..5 for cold/hot (with white outline)
+    # ---- draw map markers 1..10 for cold/hot (with white outline)
     def draw_rank_markers(dfx: pd.DataFrame, color: str):
         rank = 1
         for _, r in dfx.iterrows():
@@ -601,23 +516,22 @@ def add_top5_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
                 continue
 
             # subtle ring so the point is visible
-            ax.scatter([lon], [lat], s=90, facecolors="none", edgecolors=color,
-                       linewidths=1.4, zorder=12)
+            ax.scatter([lon], [lat], s=70, facecolors="none", edgecolors=color,
+                       linewidths=1.2, zorder=12)
 
             txt = ax.text(
                 lon, lat, str(rank),
                 ha="center", va="center",
-                fontsize=13, fontweight="bold",
+                fontsize=10, fontweight="bold",
                 color=color, zorder=13
             )
-            txt.set_path_effects([pe.withStroke(linewidth=3.5, foreground="white")])
+            txt.set_path_effects([pe.withStroke(linewidth=3.0, foreground="white")])
             rank += 1
-            if rank > 5:
+            if rank > 10:
                 break
 
-    draw_rank_markers(cold5, color="#1d4ed8")  # blue-ish
-    draw_rank_markers(hot5,  color="#dc2626")  # red-ish
-
+    draw_rank_markers(cold10, color="#1d4ed8")  # blue-ish
+    draw_rank_markers(hot10,  color="#dc2626")  # red-ish
 
 def add_contours(ax, X, Y, field):
     levels = np.arange(-30, 46, 3, dtype=float)
@@ -775,77 +689,13 @@ def estimate_local_lapse_rates_wgs(st_lons, st_lats, st_temp, st_elev,
     return lapses
 
 
-def in_night_coldpool_window(athens_now: datetime) -> bool:
-    # True Greek time (Europe/Athens): 22:00–08:30, wrapping midnight
-    t = athens_now.time()
-    return (t >= datetime.strptime("22:00", "%H:%M").time()) or (t <= datetime.strptime("08:30", "%H:%M").time())
-
-def wind_factor_kph(w_kph: np.ndarray, calm_kph: float = 5.0, fade_kph: float = 15.0) -> np.ndarray:
-    """
-    1.0 when wind <= calm_kph
-    0.0 when wind >= fade_kph
-    linear taper in between
-    """
-    w = np.asarray(w_kph, dtype=float)
-    f = np.ones_like(w, dtype=float)
-    f[w >= fade_kph] = 0.0
-    mid = (w > calm_kph) & (w < fade_kph)
-    f[mid] = (fade_kph - w[mid]) / (fade_kph - calm_kph)
-    f = np.clip(f, 0.0, 1.0)
-    return f
-
-def rh_clear_proxy_factor(rh: np.ndarray, rh_full: float = 85.0, rh_zero: float = 95.0) -> np.ndarray:
-    """
-    Optional: suppress cold-pool cooling when RH is high (fog/stratus risk).
-    1.0 when RH <= rh_full, 0.0 when RH >= rh_zero, linear in between.
-    """
-    r = np.asarray(rh, dtype=float)
-    f = np.ones_like(r, dtype=float)
-    f[r >= rh_zero] = 0.0
-    mid = (r > rh_full) & (r < rh_zero)
-    f[mid] = (rh_zero - r[mid]) / (rh_zero - rh_full)
-    f = np.clip(f, 0.0, 1.0)
-    return f
-
-def coldpool_depression_m(grid_elev: np.ndarray, dx_km: float, dy_km: float,
-                          radius_km: float = 20.0) -> np.ndarray:
-    """
-    Depression proxy: local-mean elevation minus elevation.
-    Positive -> cell is below its surroundings (valleys/basins).
-    """
-    # Convert radius to gaussian sigma in pixels (approx)
-    px = max(1.0, radius_km / max(dx_km, 1e-6))
-    py = max(1.0, radius_km / max(dy_km, 1e-6))
-
-    # Smooth elevation to get local mean
-    z = np.asarray(grid_elev, dtype=float)
-    z_mean = gaussian_filter(z, sigma=(py, px), mode="nearest")
-
-    dep = z_mean - z
-    dep = np.clip(dep, 0.0, 400.0)  # cap: don’t allow insane “basins”
-    return dep
-
-def coldpool_extra_cooling_c(dep_m: np.ndarray,
-                             k_c_per_100m: float = 1.2) -> np.ndarray:
-    """
-    Convert depression depth to extra cooling.
-    Example: 1.2°C per 100 m depression (tunable).
-    """
-    return (k_c_per_100m / 100.0) * np.asarray(dep_m, dtype=float)
-
 def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     if "TNow" not in df.columns:
         print("❌ TNow missing.")
         return (None, None)
 
     tt0 = df.copy()
-
     tt0["TNow"] = pd.to_numeric(tt0["TNow"], errors="coerce")
-    if "WindSpeedNow" in tt0.columns:
-        tt0["WindSpeedNow"] = pd.to_numeric(tt0["WindSpeedNow"], errors="coerce")
-    if "RHNow" in tt0.columns:
-        tt0["RHNow"] = pd.to_numeric(tt0["RHNow"], errors="coerce")
-
     tt0.dropna(subset=["TNow", "Latitude", "Longitude"], inplace=True)
     tt0 = tt0[~np.isclose(tt0["TNow"].to_numpy(dtype=float), SENTINEL_TEMP, atol=1e-6)]
     if tt0.empty:
@@ -862,8 +712,6 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     st_lons = tt0["Longitude"].to_numpy(dtype=float)
     st_lats = tt0["Latitude"].to_numpy(dtype=float)
     st_t = tt0["TNow"].to_numpy(dtype=float)
-    st_w = tt0["WindSpeedNow"].to_numpy(dtype=float) if "WindSpeedNow" in tt0.columns else None
-    st_rh = tt0["RHNow"].to_numpy(dtype=float) if "RHNow" in tt0.columns else None
 
     st_elev = sample_dem_lonlat(dem_path, st_lons, st_lats)
 
@@ -872,158 +720,103 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     st_lats = st_lats[ok]
     st_t = st_t[ok]
     st_elev = st_elev[ok]
-    if st_w is not None:
-        st_w = st_w[ok]
-    if st_rh is not None:
-        st_rh = st_rh[ok]
 
     if len(st_t) < 5:
         print("❌ Too few stations for Greece interpolation.")
         return (None, None)
 
+    # Estimate a local lapse rate at each station, reduce each observation to a
+    # sea-level-equivalent temperature, interpolate, and adjust back to the
+    # DEM elevation of each national-grid cell.
     st_lapse = estimate_local_lapse_rates_wgs(st_lons, st_lats, st_t, st_elev)
     st_t0 = st_t - (st_lapse * st_elev)
 
-    t0_grid = idw_fast(st_lons, st_lats, st_t0, grid_x, grid_y, k=8, power=2,
-                       max_distance=1.2, min_neighbors=3)
-    lapse_grid = idw_fast(st_lons, st_lats, st_lapse, grid_x, grid_y, k=8, power=2,
-                          max_distance=1.2, min_neighbors=3)
+    t0_grid = idw_fast(
+        st_lons, st_lats, st_t0, grid_x, grid_y,
+        k=8, power=2, max_distance=1.2, min_neighbors=3
+    )
+    lapse_grid = idw_fast(
+        st_lons, st_lats, st_lapse, grid_x, grid_y,
+        k=8, power=2, max_distance=1.2, min_neighbors=3
+    )
 
-    grid_elev = sample_dem_lonlat(dem_path, grid_x.ravel(), grid_y.ravel()).reshape(grid_x.shape)
+    grid_elev = sample_dem_lonlat(
+        dem_path,
+        grid_x.ravel(),
+        grid_y.ravel()
+    ).reshape(grid_x.shape)
+
     t_grid = t0_grid + (lapse_grid * grid_elev)
 
-    hot_grid = max_adjusted_neighbors_wgs(
-        st_lons, st_lats, st_t, st_elev, st_lapse,
-        grid_x, grid_y, grid_elev,
-        k=8, max_deg=1.2, min_neighbors=3
-    )
-
-    cold_grid = min_adjusted_neighbors_wgs(
-        st_lons, st_lats, st_t, st_elev, st_lapse,
-        grid_x, grid_y, grid_elev,
-        k=8, max_deg=1.2, min_neighbors=3
-    )
-
+    # Display only Greek land cells with a reporting station within 0.8 degrees.
     dist_mask = build_distance_mask(grid_x, grid_y, st_lons, st_lats, max_dist=0.8)
     final_mask = geo_mask & dist_mask & np.isfinite(grid_elev)
 
+    # The national map now uses this single ordinary altitude-adjusted IDW field.
     out = np.full(grid_x.shape, np.nan, dtype=float)
     out[final_mask] = t_grid[final_mask]
 
-    out_hot = np.full(grid_x.shape, np.nan, dtype=float)
-    out_hot[final_mask] = hot_grid[final_mask]
-
-    out_cold = np.full(grid_x.shape, np.nan, dtype=float)
-    out_cold[final_mask] = cold_grid[final_mask]
-
     # =========================
-    # COLD-POCKET ADJUSTMENT (22:00–08:30 Athens time, calm winds only)
-    # =========================
-    out_adj = out.copy()
-
-    if in_night_coldpool_window(athens_now):
-        base_night = np.full_like(out, np.nan, dtype=float)
-        base_night[final_mask] = np.minimum(out[final_mask], out_cold[final_mask])
-
-        dlon = (GR_LON_MAX - GR_LON_MIN) / max(GR_N - 1, 1)
-        dlat = (GR_LAT_MAX - GR_LAT_MIN) / max(GR_N - 1, 1)
-        lat0 = 0.5 * (GR_LAT_MIN + GR_LAT_MAX)
-        dx_km = 111.32 * np.cos(np.deg2rad(lat0)) * dlon
-        dy_km = 111.32 * dlat
-
-        dep = coldpool_depression_m(grid_elev, dx_km=dx_km, dy_km=dy_km, radius_km=20.0)
-        extra = coldpool_extra_cooling_c(dep, k_c_per_100m=1.2)
-
-        # Wind gating is REQUIRED (you asked "only for calm hours")
-        gate_wind = np.zeros_like(out, dtype=float)
-        if st_w is not None:
-            ok_w = np.isfinite(st_w)
-            if np.sum(ok_w) >= 5:
-                w_grid = idw_fast(st_lons[ok_w], st_lats[ok_w], st_w[ok_w],
-                                  grid_x, grid_y, k=8, power=2, max_distance=1.2, min_neighbors=3)
-                gate_wind = wind_factor_kph(w_grid, calm_kph=5.0, fade_kph=15.0)
-
-        # Optional RH gating (only if RHNow exists and enough values)
-        gate_rh = np.ones_like(out, dtype=float)
-        if st_rh is not None:
-            ok_rh = np.isfinite(st_rh)
-            if np.sum(ok_rh) >= 5:
-                rh_grid = idw_fast(st_lons[ok_rh], st_lats[ok_rh], st_rh[ok_rh],
-                                   grid_x, grid_y, k=8, power=2, max_distance=1.2, min_neighbors=3)
-                gate_rh = rh_clear_proxy_factor(rh_grid, rh_full=85.0, rh_zero=95.0)
-
-        gate = gate_wind * gate_rh
-        extra_eff = extra * gate
-
-        out_adj = base_night.copy()
-        out_adj[final_mask] = out_adj[final_mask] - extra_eff[final_mask]
-
-    # =========================
-    # MIN/MAX FOR TEXT ONLY (MOST EXTREME VALUES) + LOCATIONS (lon/lat)
-    #   min: lowest of out, out_cold, out_adj
-    #   max: highest of out, out_hot,  out_adj
+    # MIN/MAX FROM THE DISPLAYED FIELD ONLY
     # =========================
     interp_min = None
     interp_max = None
-    min_lonlat = None
-    max_lonlat = None
-    
+
     try:
-        # Candidate fields for min/max (as full grids)
-        min_fields = [out, out_cold, out_adj]
-        max_fields = [out, out_hot,  out_adj]
-    
-        # Build a "masked candidates" stack so argmin/argmax works in 2D
-        def _masked(arr):
-            a = np.asarray(arr, dtype=float)
-            # outside final_mask -> nan
-            a = np.where(final_mask, a, np.nan)
-            return a
-
-        min_stack = np.stack([_masked(a) for a in min_fields], axis=0)  # (k, ny, nx)
-        max_stack = np.stack([_masked(a) for a in max_fields], axis=0)
-
-        interp_min = float(np.nanmin(min_stack))
-        interp_max = float(np.nanmax(max_stack))
-
-        # --- coordinates of absolute min
-        if np.isfinite(interp_min):
-            kk, yy, xx = np.unravel_index(np.nanargmin(min_stack), min_stack.shape)
-            min_lon = float(grid_x[yy, xx])
-            min_lat = float(grid_y[yy, xx])
-            min_lonlat = (min_lon, min_lat)
-
-        # --- coordinates of absolute max
-        if np.isfinite(interp_max):
-            kk, yy, xx = np.unravel_index(np.nanargmax(max_stack), max_stack.shape)
-            max_lon = float(grid_x[yy, xx])
-            max_lat = float(grid_y[yy, xx])
-            max_lonlat = (max_lon, max_lat)
-    
+        if np.any(np.isfinite(out)):
+            interp_min = float(np.nanmin(out))
+            interp_max = float(np.nanmax(out))
     except Exception:
         interp_min, interp_max = None, None
-        min_lonlat, max_lonlat = None, None
-
-
-
 
     # =========================
-    # FROST % AFTER ALL ADJUSTMENTS
+    # LATITUDE-WEIGHTED LAND-AREA STATISTICS FROM out ONLY
+    # =========================
+    earth_radius_km = 6371.0088
+    dlon_rad = np.deg2rad((GR_LON_MAX - GR_LON_MIN) / max(GR_N - 1, 1))
+    dlat_rad = np.deg2rad((GR_LAT_MAX - GR_LAT_MIN) / max(GR_N - 1, 1))
+
+    cell_area_km2 = (
+        (earth_radius_km ** 2)
+        * dlon_rad
+        * dlat_rad
+        * np.cos(np.deg2rad(grid_y))
+    )
+
+    mapped_mask = final_mask & np.isfinite(out)
+    mapped_area_km2 = float(np.sum(cell_area_km2[mapped_mask]))
+    coverage_pct = 100.0 * mapped_area_km2 / GREECE_RASTERIZED_LAND_AREA_KM2
+
+    def pct_area_above(threshold_c: float) -> float:
+        threshold_mask = mapped_mask & (out > threshold_c)
+        area_km2 = float(np.sum(cell_area_km2[threshold_mask]))
+        return 100.0 * area_km2 / GREECE_RASTERIZED_LAND_AREA_KM2
+
+    pct_above_30 = pct_area_above(30.0)
+    pct_above_37 = pct_area_above(37.0)
+    pct_above_40 = pct_area_above(40.0)
+
+    print(f"ℹ️ National interpolation coverage: {mapped_area_km2:,.0f} km² ({coverage_pct:.1f}% of Greece)")
+    print(f"ℹ️ Area >30°C: {pct_above_30:.1f}% of Greece")
+    print(f"ℹ️ Area >37°C: {pct_above_37:.1f}% of Greece")
+    print(f"ℹ️ Area >40°C: {pct_above_40:.1f}% of Greece")
+
+    # =========================
+    # FROST % FROM out ONLY
     # =========================
     frost_text = ""
     try:
-        denom = float(np.sum(final_mask))
-        if denom > 0:
-            frost_cells = np.sum(final_mask & (out_adj <= 0.0))
-            frost_pct = 100.0 * float(frost_cells) / denom
-            if round(frost_pct, 2) > 0.0:
-                frost_text = f"{frost_pct:.1f}% της επικράτειας\nμε παγετό αέρα"
+        frost_mask = mapped_mask & (out <= 0.0)
+        frost_area_km2 = float(np.sum(cell_area_km2[frost_mask]))
+        frost_pct = 100.0 * frost_area_km2 / GREECE_RASTERIZED_LAND_AREA_KM2
+        if round(frost_pct, 2) > 0.0:
+            frost_text = f"{frost_pct:.1f}% της επικράτειας\nμε παγετό αέρα"
     except Exception:
         frost_text = ""
 
     fig, ax = plt.subplots(figsize=(12, 8))
     img = ax.imshow(
-        ma.masked_invalid(out_adj),
+        ma.masked_invalid(out),
         extent=(GR_LON_MIN, GR_LON_MAX, GR_LAT_MIN, GR_LAT_MAX),
         origin="lower",
         cmap=TEMP_CMAP,
@@ -1032,18 +825,31 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     )
 
     greece_gdf_wgs.boundary.plot(ax=ax, color="black", linewidth=0.6)
-    add_contours(ax, grid_x, grid_y, out_adj)
+    add_contours(ax, grid_x, grid_y, out)
     _temp_colorbar(ax, img)
 
     ax.set_title("Τρέχουσα θερμοκρασία (προσαρμογή υψομέτρου)", fontsize=16)
 
     if interp_min is not None and interp_max is not None:
-        mm_text = "Εύρος παρεμβολής (ξηρά):\n{0:.1f} έως {1:.1f}°C".format(interp_min, interp_max)
+        mm_text = (
+            "Εύρος παρεμβολής (ξηρά):\n"
+            "{0:.1f} έως {1:.1f}°C\n\n"
+            "Ποσοστό έκτασης επικράτειας:\n"
+            ">30°C: {2:.1f}%\n"
+            ">37°C: {3:.1f}%\n"
+            ">40°C: {4:.1f}%"
+        ).format(
+            interp_min,
+            interp_max,
+            pct_above_30,
+            pct_above_37,
+            pct_above_40
+        )
         ax.text(
             0.01, 0.985, mm_text,
             transform=ax.transAxes,
             ha="left", va="top",
-            fontsize=11,
+            fontsize=10.5,
             color="black",
             bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.2"),
             path_effects=[pe.withStroke(linewidth=3.0, foreground="white")]
@@ -1052,7 +858,7 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     ax.set_xlabel("Γεωγρ. μήκος", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
 
-    add_top5_box_greece(ax, tt0, frost_text=frost_text)
+    add_top10_box_greece(ax, tt0, frost_text=frost_text)
 
     ax.text(
         0.01, 0.01, stamp_text(athens_now),
@@ -2062,7 +1868,7 @@ def main():
     data = data[(data["Latitude"] != 0) & (data["Longitude"] != 0)]
     data = data[data["Longitude"] <= 30]
     
-    # Exclude specific stations from all maps and top-5 lists
+    # Exclude specific stations from all maps and top-10 lists
     if "webcode" in data.columns:
         data = data[~data["webcode"].astype(str).str.strip().isin(["wu_panoramavoulas", "wu_tilos"])]
     
