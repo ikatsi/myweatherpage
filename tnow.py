@@ -534,13 +534,18 @@ def add_top10_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
     draw_rank_markers(hot10,  color="#dc2626")  # red-ish
 
 def add_contours(ax, X, Y, field):
+    # Ordinary contours every 3°C, excluding levels drawn separately below
     levels = np.arange(-30, 46, 3, dtype=float)
-    thin_levels = [lv for lv in levels if abs(lv) > 1e-9]
+    thin_levels = [
+        lv for lv in levels
+        if not np.isclose(lv, 0.0)
+        and not np.isclose(lv, 30.0)
+    ]
 
     cs_thin = None
-    cs_zero = None
+    cs_special = None
 
-    # thin contours (every 3°C except 0)
+    # Thin contours every 3°C, except 0°C and 30°C
     try:
         cs_thin = ax.contour(
             X, Y, field,
@@ -552,52 +557,58 @@ def add_contours(ax, X, Y, field):
     except Exception:
         cs_thin = None
 
-    # thick 0°C contour
+    # Thicker contours for important thresholds:
+    # 0°C for frost, 30°C for heat, 37°C for very high heat
     try:
-        cs_zero = ax.contour(
+        cs_special = ax.contour(
             X, Y, field,
-            levels=[0.0],
+            levels=[0.0, 30.0, 37.0],
             colors="black",
             linewidths=1.3,
             alpha=0.95
         )
     except Exception:
-        cs_zero = None
+        cs_special = None
 
-    # ---- labels (small, unobtrusive, readable)
-    # label every other contour to reduce clutter
+    # Labels for ordinary contours
     if cs_thin is not None:
         try:
-            label_levels = cs_thin.levels[:]    # label every contour level
             texts = ax.clabel(
                 cs_thin,
-                levels=label_levels,
+                levels=cs_thin.levels[:],
                 inline=True,
                 inline_spacing=2,
                 fmt="%d",
-                fontsize=6  # small
+                fontsize=6
             )
+
             for t in texts:
                 t.set_rotation(0)
                 t.set_rotation_mode("anchor")
-                t.set_path_effects([pe.withStroke(linewidth=1.8, foreground="white")])
+                t.set_path_effects([
+                    pe.withStroke(linewidth=1.8, foreground="white")
+                ])
         except Exception:
             pass
 
-    # label 0°C as well (even smaller, just "0°C")
-    if cs_zero is not None:
+    # Labels for the thicker threshold contours
+    if cs_special is not None:
         try:
-            texts0 = ax.clabel(
-                cs_zero,
+            texts_special = ax.clabel(
+                cs_special,
+                levels=cs_special.levels[:],
                 inline=True,
                 inline_spacing=2,
-                fmt="0",
+                fmt="%d",
                 fontsize=6
             )
-            for t in texts0:
+
+            for t in texts_special:
                 t.set_rotation(0)
                 t.set_rotation_mode("anchor")
-                t.set_path_effects([pe.withStroke(linewidth=1.8, foreground="white")])
+                t.set_path_effects([
+                    pe.withStroke(linewidth=1.8, foreground="white")
+                ])
         except Exception:
             pass
 
