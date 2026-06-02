@@ -522,10 +522,10 @@ def add_top10_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
             txt = ax.text(
                 lon, lat, str(rank),
                 ha="center", va="center",
-                fontsize=10, fontweight="bold",
+                fontsize=9, fontweight="bold",
                 color=color, zorder=13
             )
-            txt.set_path_effects([pe.withStroke(linewidth=3.0, foreground="white")])
+            txt.set_path_effects([pe.withStroke(linewidth=2.8, foreground="white")])
             rank += 1
             if rank > 10:
                 break
@@ -575,10 +575,12 @@ def add_contours(ax, X, Y, field):
                 inline=True,
                 inline_spacing=2,
                 fmt="%d",
-                fontsize=7  # small
+                fontsize=6  # small
             )
             for t in texts:
-                t.set_path_effects([pe.withStroke(linewidth=2.0, foreground="white")])
+                t.set_rotation(0)
+                t.set_rotation_mode("anchor")
+                t.set_path_effects([pe.withStroke(linewidth=1.8, foreground="white")])
         except Exception:
             pass
 
@@ -590,10 +592,12 @@ def add_contours(ax, X, Y, field):
                 inline=True,
                 inline_spacing=2,
                 fmt="0",
-                fontsize=7
+                fontsize=6
             )
             for t in texts0:
-                t.set_path_effects([pe.withStroke(linewidth=2.0, foreground="white")])
+                t.set_rotation(0)
+                t.set_rotation_mode("anchor")
+                t.set_path_effects([pe.withStroke(linewidth=1.8, foreground="white")])
         except Exception:
             pass
 
@@ -849,7 +853,7 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
             0.01, 0.985, mm_text,
             transform=ax.transAxes,
             ha="left", va="top",
-            fontsize=10.5,
+            fontsize=8.2,
             color="black",
             bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.2"),
             path_effects=[pe.withStroke(linewidth=3.0, foreground="white")]
