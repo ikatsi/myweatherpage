@@ -818,8 +818,8 @@ def draw_rank_markers(ax, df5: pd.DataFrame, lon_col="Longitude", lat_col="Latit
 
 def add_temp_contours_wgs(ax, grid_x, grid_y, field, special_levels=None):
     """
-    Draw ordinary 3°C contours plus thicker threshold contours.
-    Labels are small and forced to remain horizontal.
+    Draw ordinary 3°C contours without labels.
+    Draw selected prominent contours more strongly and label only those.
     """
     if special_levels is None:
         special_levels = []
@@ -830,11 +830,8 @@ def add_temp_contours_wgs(ax, grid_x, grid_y, field, special_levels=None):
         if not any(np.isclose(lv, special) for special in special_levels)
     ]
 
-    cs_thin = None
-    cs_special = None
-
     try:
-        cs_thin = ax.contour(
+        ax.contour(
             grid_x, grid_y, field,
             levels=thin_levels,
             colors="black",
@@ -842,7 +839,9 @@ def add_temp_contours_wgs(ax, grid_x, grid_y, field, special_levels=None):
             alpha=0.70
         )
     except Exception:
-        cs_thin = None
+        pass
+
+    cs_special = None
 
     try:
         if special_levels:
@@ -856,25 +855,22 @@ def add_temp_contours_wgs(ax, grid_x, grid_y, field, special_levels=None):
     except Exception:
         cs_special = None
 
-    for cs in [cs_thin, cs_special]:
-        if cs is None:
-            continue
-
+    if cs_special is not None:
         try:
             texts = ax.clabel(
-                cs,
-                levels=cs.levels[:],
+                cs_special,
+                levels=cs_special.levels[:],
                 inline=True,
                 inline_spacing=2,
                 fmt="%d",
-                fontsize=6
+                fontsize=7
             )
 
             for t in texts:
                 t.set_rotation(0)
                 t.set_rotation_mode("anchor")
                 t.set_path_effects([
-                    pe.withStroke(linewidth=1.8, foreground="white")
+                    pe.withStroke(linewidth=2.0, foreground="white")
                 ])
         except Exception:
             pass
@@ -1269,23 +1265,50 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
 
     if var_col == "TMin":
         pct_below_0 = pct_area_below(0.0)
-        special_levels = [0.0]
+
+        # Prominent contour lines for the Tmin map.
+        special_levels = [0.0, 10.0, 20.0, 25.0, 30.0]
+
         stats_text = (
-            "Ποσοστό έκτασης επικράτειας:\n"
-            f"<0°C: {pct_below_0:.1f}%"
+            "Ποσοστό έκτασης επικράτειας βάσει παρεμβολής:\n"
+            f"<0°C: {pct_below_0:.1f}%".replace(".", ",")
         )
+
         print(f"ℹ️ {var_col} area <0°C: {pct_below_0:.1f}% of Greece")
+
     else:
         pct_above_30 = pct_area_above(30.0)
         pct_above_37 = pct_area_above(37.0)
         pct_above_40 = pct_area_above(40.0)
-        special_levels = [30.0, 37.0, 40.0]
+
+        # Prominent contour lines for the Tmax map.
+        special_levels = [0.0, 10.0, 20.0, 25.0, 30.0, 37.0, 40.0]
+
+        def format_pct_with_observed_floor(pct_value: float, threshold_c: float) -> str:
+            """
+            Show <0,1% when:
+              - the interpolated percentage is positive but below 0.1%, or
+              - interpolation gives 0.0%, but at least one valid station
+                has actually exceeded the threshold.
+            """
+            observed_exceedance = bool((tt_rank[var_col] > threshold_c).any())
+
+            if pct_value < 0.1 and (pct_value > 0.0 or observed_exceedance):
+                return "<0,1%"
+
+            return f"{pct_value:.1f}%".replace(".", ",")
+
+        pct_above_30_text = format_pct_with_observed_floor(pct_above_30, 30.0)
+        pct_above_37_text = format_pct_with_observed_floor(pct_above_37, 37.0)
+        pct_above_40_text = format_pct_with_observed_floor(pct_above_40, 40.0)
+
         stats_text = (
-            "Ποσοστό έκτασης επικράτειας:\n"
-            f">30°C: {pct_above_30:.1f}%\n"
-            f">37°C: {pct_above_37:.1f}%\n"
-            f">40°C: {pct_above_40:.1f}%"
+            "Ποσοστό έκτασης επικράτειας βάσει παρεμβολής:\n"
+            f">30°C: {pct_above_30_text}\n"
+            f">37°C: {pct_above_37_text}\n"
+            f">40°C: {pct_above_40_text}"
         )
+
         print(f"ℹ️ {var_col} area >30°C: {pct_above_30:.1f}% of Greece")
         print(f"ℹ️ {var_col} area >37°C: {pct_above_37:.1f}% of Greece")
         print(f"ℹ️ {var_col} area >40°C: {pct_above_40:.1f}% of Greece")
@@ -1311,11 +1334,22 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
 
     if interp_min is not None and interp_max is not None:
+        display_min = interp_min
+        display_max = interp_max
+
+        # For Tmax, show the highest actual valid station reading
+        # when it exceeds the highest interpolated land-grid value.
+        if var_col == "TMax" and not tt_rank.empty:
+            actual_station_max = float(tt_rank[var_col].max())
+
+            if np.isfinite(actual_station_max):
+                display_max = max(display_max, actual_station_max)
+
         left_text = (
-            "Εύρος παρεμβολής (ξηρά):\n"
-            f"{interp_min:.1f} έως {interp_max:.1f}°C\n\n"
+            "Εύρος θερμοκρασιών στην ξηρά:\n"
+            f"{display_min:.1f} έως {display_max:.1f}°C\n\n"
             + stats_text
-        )
+        ).replace(".", ",")
         ax.text(
             0.01, 0.985, left_text,
             transform=ax.transAxes,
