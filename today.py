@@ -863,7 +863,7 @@ def add_temp_contours_wgs(ax, grid_x, grid_y, field, special_levels=None):
                 inline=True,
                 inline_spacing=2,
                 fmt="%d",
-                fontsize=7
+                fontsize=5
             )
 
             for t in texts:
