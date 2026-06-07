@@ -434,6 +434,11 @@ def stamp_text(athens_now: datetime) -> str:
     return "Δημιουργήθηκε για το e-kairos.gr\n" + ts
 
 
+def fmt_decimal_comma(value: float, decimals: int = 1) -> str:
+    """Format a number for map text using a comma as the decimal separator."""
+    return f"{float(value):.{decimals}f}".replace(".", ",")
+
+
 def pick_station_label_column(df: pd.DataFrame) -> str:
     """
     Picks the best column to display for station name/area.
@@ -480,7 +485,7 @@ def add_top10_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
             except Exception:
                 continue
             name = shorten_for_box(str(r.get(label_col, "–")), max_chars=TOPBOX_NAME_MAX)
-            lines.append("{0}. {1}: {2:.1f}°C".format(i, name, t))
+            lines.append(f"{i}. {name}: {fmt_decimal_comma(t, 1)}°C")
             i += 1
         return "\n".join(lines)
 
@@ -534,20 +539,20 @@ def add_top10_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
     draw_rank_markers(hot10,  color="#dc2626")  # red-ish
 
 def add_contours(ax, X, Y, field):
-    # Ordinary contours every 3°C, excluding levels drawn separately below
+    """
+    Draw ordinary contours every 3°C without labels.
+    Draw selected prominent contours more strongly and label only those.
+    """
     levels = np.arange(-30, 46, 3, dtype=float)
+    special_levels = [0.0, 10.0, 20.0, 30.0, 37.0, 40.0]
+
     thin_levels = [
         lv for lv in levels
-        if not np.isclose(lv, 0.0)
-        and not np.isclose(lv, 30.0)
+        if not any(np.isclose(lv, special) for special in special_levels)
     ]
 
-    cs_thin = None
-    cs_special = None
-
-    # Thin contours every 3°C, except 0°C and 30°C
     try:
-        cs_thin = ax.contour(
+        ax.contour(
             X, Y, field,
             levels=thin_levels,
             colors="black",
@@ -555,14 +560,14 @@ def add_contours(ax, X, Y, field):
             alpha=0.70
         )
     except Exception:
-        cs_thin = None
+        pass
 
-    # Thicker contours for important thresholds:
-    # 0°C for frost, 30°C for heat, 37°C for very high heat
+    cs_special = None
+
     try:
         cs_special = ax.contour(
             X, Y, field,
-            levels=[0.0, 30.0, 37.0],
+            levels=special_levels,
             colors="black",
             linewidths=1.3,
             alpha=0.95
@@ -570,28 +575,6 @@ def add_contours(ax, X, Y, field):
     except Exception:
         cs_special = None
 
-    # Labels for ordinary contours
-    if cs_thin is not None:
-        try:
-            texts = ax.clabel(
-                cs_thin,
-                levels=cs_thin.levels[:],
-                inline=True,
-                inline_spacing=2,
-                fmt="%d",
-                fontsize=6
-            )
-
-            for t in texts:
-                t.set_rotation(0)
-                t.set_rotation_mode("anchor")
-                t.set_path_effects([
-                    pe.withStroke(linewidth=1.8, foreground="white")
-                ])
-        except Exception:
-            pass
-
-    # Labels for the thicker threshold contours
     if cs_special is not None:
         try:
             texts_special = ax.clabel(
@@ -600,7 +583,7 @@ def add_contours(ax, X, Y, field):
                 inline=True,
                 inline_spacing=2,
                 fmt="%d",
-                fontsize=6
+                fontsize=5
             )
 
             for t in texts_special:
@@ -816,16 +799,40 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     print(f"ℹ️ Area >37°C: {pct_above_37:.1f}% of Greece")
     print(f"ℹ️ Area >40°C: {pct_above_40:.1f}% of Greece")
 
+    def format_pct_with_observed_floor(pct_value: float, threshold_c: float) -> str:
+        """
+        Show <0,1% when the interpolated percentage is below 0.1%,
+        but the threshold has genuinely been crossed either by the
+        interpolated field or by at least one valid station observation.
+        """
+        observed_exceedance = bool((tt0["TNow"] > threshold_c).any())
+
+        if pct_value < 0.1 and (pct_value > 0.0 or observed_exceedance):
+            return "<0,1%"
+
+        return fmt_decimal_comma(pct_value, 1) + "%"
+
+    pct_above_30_text = format_pct_with_observed_floor(pct_above_30, 30.0)
+    pct_above_37_text = format_pct_with_observed_floor(pct_above_37, 37.0)
+    pct_above_40_text = format_pct_with_observed_floor(pct_above_40, 40.0)
+
     # =========================
-    # FROST % FROM out ONLY
+    # FROST % FROM out ONLY, WITH OBSERVED-STATION DISPLAY FLOOR
     # =========================
     frost_text = ""
     try:
         frost_mask = mapped_mask & (out <= 0.0)
         frost_area_km2 = float(np.sum(cell_area_km2[frost_mask]))
         frost_pct = 100.0 * frost_area_km2 / GREECE_RASTERIZED_LAND_AREA_KM2
-        if round(frost_pct, 2) > 0.0:
-            frost_text = f"{frost_pct:.1f}% της επικράτειας\nμε παγετό αέρα"
+        observed_frost = bool((tt0["TNow"] <= 0.0).any())
+
+        if frost_pct < 0.1 and (frost_pct > 0.0 or observed_frost):
+            frost_pct_text = "<0,1%"
+        else:
+            frost_pct_text = fmt_decimal_comma(frost_pct, 1) + "%"
+
+        if frost_pct > 0.0 or observed_frost:
+            frost_text = f"{frost_pct_text} της επικράτειας\nμε παγετό αέρα"
     except Exception:
         frost_text = ""
 
@@ -846,19 +853,28 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     ax.set_title("Τρέχουσα θερμοκρασία (προσαρμογή υψομέτρου)", fontsize=16)
 
     if interp_min is not None and interp_max is not None:
+        display_min = interp_min
+        display_max = interp_max
+
+        # Show actual valid station extrema when they extend beyond
+        # the interpolated land-grid range. The interpolation itself
+        # remains unchanged.
+        if not tt0.empty:
+            actual_station_min = float(tt0["TNow"].min())
+            actual_station_max = float(tt0["TNow"].max())
+
+            if np.isfinite(actual_station_min):
+                display_min = min(display_min, actual_station_min)
+            if np.isfinite(actual_station_max):
+                display_max = max(display_max, actual_station_max)
+
         mm_text = (
-            "Εύρος παρεμβολής (ξηρά):\n"
-            "{0:.1f} έως {1:.1f}°C\n\n"
-            "Ποσοστό έκτασης επικράτειας:\n"
-            ">30°C: {2:.1f}%\n"
-            ">37°C: {3:.1f}%\n"
-            ">40°C: {4:.1f}%"
-        ).format(
-            interp_min,
-            interp_max,
-            pct_above_30,
-            pct_above_37,
-            pct_above_40
+            "Εύρος θερμοκρασιών στην ξηρά:\n"
+            f"{fmt_decimal_comma(display_min, 1)} έως {fmt_decimal_comma(display_max, 1)}°C\n\n"
+            "Ποσοστό έκτασης επικράτειας βάσει παρεμβολής:\n"
+            f">30°C: {pct_above_30_text}\n"
+            f">37°C: {pct_above_37_text}\n"
+            f">40°C: {pct_above_40_text}"
         )
         ax.text(
             0.01, 0.985, mm_text,
@@ -1075,11 +1091,11 @@ def make_tnow_attica_egsa(df, greece_gdf_wgs, dem_path, athens_now):
 
     def fmt_lon(x, pos):
         lon, _lat = EGSA_TO_WGS.transform(x, y_ref_for_lon)
-        return f"{lon:.2f}"
+        return fmt_decimal_comma(lon, 2)
 
     def fmt_lat(y, pos):
         _lon, lat = EGSA_TO_WGS.transform(x_ref_for_lat, y)
-        return f"{lat:.2f}"
+        return fmt_decimal_comma(lat, 2)
 
     ax.xaxis.set_major_formatter(FuncFormatter(fmt_lon))
     ax.yaxis.set_major_formatter(FuncFormatter(fmt_lat))
@@ -1247,11 +1263,11 @@ def make_tnow_crete_egsa(df, greece_gdf_wgs, dem_path, athens_now):
 
     def fmt_lon(x, pos):
         lon, _lat = EGSA_TO_WGS.transform(x, y_ref_for_lon)
-        return f"{lon:.2f}"
+        return fmt_decimal_comma(lon, 2)
 
     def fmt_lat(y, pos):
         _lon, lat = EGSA_TO_WGS.transform(x_ref_for_lat, y)
-        return f"{lat:.2f}"
+        return fmt_decimal_comma(lat, 2)
 
     ax.xaxis.set_major_formatter(FuncFormatter(fmt_lon))
     ax.yaxis.set_major_formatter(FuncFormatter(fmt_lat))
@@ -1419,11 +1435,11 @@ def make_tnow_negreece_egsa(df, greece_gdf_wgs, dem_path, athens_now):
 
     def fmt_lon(x, pos):
         lon, _lat = EGSA_TO_WGS.transform(x, y_ref_for_lon)
-        return f"{lon:.2f}"
+        return fmt_decimal_comma(lon, 2)
 
     def fmt_lat(y, pos):
         _lon, lat = EGSA_TO_WGS.transform(x_ref_for_lat, y)
-        return f"{lat:.2f}"
+        return fmt_decimal_comma(lat, 2)
 
     ax.xaxis.set_major_formatter(FuncFormatter(fmt_lon))
     ax.yaxis.set_major_formatter(FuncFormatter(fmt_lat))
@@ -1604,11 +1620,11 @@ def make_tnow_nwgreece_egsa(df, greece_gdf_wgs, dem_path, athens_now):
 
     def fmt_lon(x, pos):
         lon, _lat = EGSA_TO_WGS.transform(x, y_ref_for_lon)
-        return f"{lon:.2f}"
+        return fmt_decimal_comma(lon, 2)
 
     def fmt_lat(y, pos):
         _lon, lat = EGSA_TO_WGS.transform(x_ref_for_lat, y)
-        return f"{lat:.2f}"
+        return fmt_decimal_comma(lat, 2)
 
     ax.xaxis.set_major_formatter(FuncFormatter(fmt_lon))
     ax.yaxis.set_major_formatter(FuncFormatter(fmt_lat))
@@ -1784,11 +1800,11 @@ def make_tnow_swgreece_egsa(df, greece_gdf_wgs, dem_path, athens_now):
 
     def fmt_lon(x, pos):
         lon, _lat = EGSA_TO_WGS.transform(x, y_ref_for_lon)
-        return f"{lon:.2f}"
+        return fmt_decimal_comma(lon, 2)
 
     def fmt_lat(y, pos):
         _lon, lat = EGSA_TO_WGS.transform(x_ref_for_lat, y)
-        return f"{lat:.2f}"
+        return fmt_decimal_comma(lat, 2)
 
     ax.xaxis.set_major_formatter(FuncFormatter(fmt_lon))
     ax.yaxis.set_major_formatter(FuncFormatter(fmt_lat))
