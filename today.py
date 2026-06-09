@@ -1173,7 +1173,7 @@ def make_todayrain_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
             force_one_col=True,
             title_font_size=10
         )
-        draw_rank_markers(ax, wet, lon_col="Longitude", lat_col="Latitude")
+        ### draw_rank_markers(ax, wet, lon_col="Longitude", lat_col="Latitude") ### δείχνει τα τοπ 15 πάνω στο χάρτη
 
     main_path = save_stable(fig, out_dir, "todayrain.png")
     plt.close(fig)
@@ -1376,7 +1376,7 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
         lines.append(f"{rank}. {nm}: {val_txt}°C")
 
     add_top5_box(ax, box_title, lines, x0=0.99, y0=0.98, font_size=8.2, two_col_font_size=8.2, force_one_col=True)
-    draw_rank_markers(ax, rank_df, lon_col="Longitude", lat_col="Latitude")
+    ### draw_rank_markers(ax, rank_df, lon_col="Longitude", lat_col="Latitude") ### δείχνει τα τοπ 15 πάνω στο χάρτη
 
     main_path = save_stable(fig, out_dir, stable_name)
     plt.close(fig)
