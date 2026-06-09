@@ -1184,7 +1184,8 @@ def make_todayrain_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
 
 def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
                            grid_elev, cell_area_km2, out_dir, athens_now, dem_path,
-                           var_col, stable_name, title, box_title, sort_ascending):
+                           var_col, stable_name, title, box_title, sort_ascending,
+                           extra_without_topbox_name=None):
     if var_col not in df.columns:
         print(f"❌ {var_col} missing.")
         return (None, None)
@@ -1366,6 +1367,19 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
         bbox=dict(facecolor="white", edgecolor="none", boxstyle="round,pad=0.3")
     )
 
+    # Optionally save an additional copy before adding the top-15 box.
+    # Used for the national Tmax map only.
+    extra_without_topbox_path = None
+
+    if extra_without_topbox_name:
+        extra_without_topbox_path = save_stable(
+            fig,
+            out_dir,
+            extra_without_topbox_name
+        )
+
+        print(f"✅ Saved without top-15 box: {extra_without_topbox_path}")
+        
     tt_rank["__name"] = tt_rank.apply(lambda r: safe_name_from_row(r, "citygr"), axis=1)
     rank_df = tt_rank.sort_values(var_col, ascending=sort_ascending).head(15)
 
@@ -1382,7 +1396,7 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
     plt.close(fig)
 
     print(f"✅ Saved: {main_path}")
-    return main_path, None
+    return main_path, extra_without_topbox_path
 
 
 # =========================
@@ -1758,14 +1772,15 @@ def main():
     tmax_input = temp_input
     tmax_dir = os.path.join(BASE_DIR, "TmaxMaps")
 
-    tmax_main, _ = make_temp_map_national(
+    tmax_with_top15, tmax_main = make_temp_map_national(
         tmax_input, greece, grid_x, grid_y, geo_mask,
         grid_elev, cell_area_km2, tmax_dir, athens_now, DEM_PATH,
         var_col="TMax",
-        stable_name="tmax.png",
+        stable_name="tmax_with_top15.png",
         title="Μέγιστη θερμοκρασία (προσαρμογή υψομέτρου)",
         box_title="Θερμότερες 15 περιοχές",
-        sort_ascending=False
+        sort_ascending=False,
+        extra_without_topbox_name="tmax.png"
     )
 
 
@@ -1774,6 +1789,7 @@ def main():
         (rain_main, "todayrain.png"),
         (tmin_main, "tmin.png"),
         (tmax_main, "tmax.png"),
+        (tmax_with_top15, "tmax_with_top15.png"),
     ]
 
     try:
