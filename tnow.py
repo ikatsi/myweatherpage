@@ -535,8 +535,8 @@ def add_top10_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
             if rank > 10:
                 break
 
-    draw_rank_markers(cold10, color="#1d4ed8")  # blue-ish
-    draw_rank_markers(hot10,  color="#dc2626")  # red-ish
+    ### draw_rank_markers(cold10, color="#1d4ed8")  # blue-ish ### δείχνει τα τοπ 10 ψυχρότερα πάνω στον χάρτη
+    ### draw_rank_markers(hot10,  color="#dc2626")  # red-ish  ### δείχνει τα τοπ 10 θερμότερα πάνω στον χάρτη
 
 def add_contours(ax, X, Y, field):
     """
