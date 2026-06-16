@@ -17,7 +17,8 @@ jobs:
 
     env:
       MPLBACKEND: Agg
-      CURRENTYEARURL: ${{ secrets.CURRENTYEARURL }}
+      PRIVATE_CURRENTYEAR_URL:   ${{ secrets.PRIVATE_CURRENTYEAR_URL }}
+      PRIVATE_CURRENTYEAR_TOKEN: ${{ secrets.PRIVATE_CURRENTYEAR_TOKEN }}
       FTP_HOST: ${{ secrets.FTP_HOST }}
       FTP_USER: ${{ secrets.FTP_USER }}
       FTP_PASS: ${{ secrets.FTP_PASS }}
