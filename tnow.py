@@ -29,6 +29,8 @@ import os
 import time
 import shutil
 import subprocess, zipfile
+import builtins
+import warnings
 from time import perf_counter
 from io import StringIO
 from datetime import datetime
@@ -56,6 +58,33 @@ import requests
 import rasterio
 from pyproj import Transformer
 from ftplib import FTP_TLS
+
+# =========================
+# PUBLIC LOG CONTROL
+# =========================
+# GitHub Actions logs are visible in a public repository.
+# Default: keep script output quiet so HTTP details, paths, filenames,
+# coverage percentages, body previews, and upload names are not printed.
+QUIET_PUBLIC_LOGS = os.environ.get("QUIET_PUBLIC_LOGS", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off"
+)
+
+_real_print = builtins.print
+
+
+def print(*args, **kwargs):
+    if not QUIET_PUBLIC_LOGS:
+        _real_print(*args, **kwargs)
+
+
+warnings.filterwarnings(
+    "ignore",
+    category=RuntimeWarning,
+    message="invalid value encountered in divide"
+)
 
 
 # =========================
@@ -293,12 +322,9 @@ def fetch_text(url: str) -> str:
             print("ℹ️ HTTP:", r.status_code, "| Content-Type:", ct)
 
             if r.status_code >= 400:
-                try:
-                    preview = (r.text or "")[:300].replace("\n", "\\n")
-                except Exception:
-                    preview = ""
-                if preview:
-                    print("ℹ️ Body preview:", preview)
+                raise requests.exceptions.RequestException(
+                    "HTTP error while fetching protected weather feed: {}".format(r.status_code)
+                )
 
             r.raise_for_status()
 
@@ -330,9 +356,8 @@ def fetch_text(url: str) -> str:
                 print("⚠️ Suspected mojibake in decoded text (check encoding/headers).")
 
             if not _looks_like_tsv(text):
-                preview = text[:200].replace("\n", "\\n")
                 raise requests.exceptions.RequestException(
-                    "Response did not look like tab-delimited weather data. Preview: " + preview
+                    "Response did not look like tab-delimited weather data."
                 )
 
             return text
@@ -407,7 +432,12 @@ def idw_fast(x, y, z, xi, yi, k=8, power=2, max_distance=1.0, min_neighbors=3):
     num = np.sum(w * z_nei, axis=1)
     den = np.sum(w, axis=1)
 
-    zi_ok = np.where(den > 0, num / den, np.nan)
+    zi_ok = np.divide(
+        num,
+        den,
+        out=np.full_like(num, np.nan, dtype=float),
+        where=den > 0
+    )
     zi[ok_pts] = zi_ok[ok_pts]
     return zi.reshape(xi.shape)
 
