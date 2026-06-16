@@ -17,30 +17,19 @@ jobs:
 
     env:
       MPLBACKEND: Agg
-
-      PRIVATE_WEATHERNOW_URL:   ${{ secrets.PRIVATE_WEATHERNOW_URL }}
+      PRIVATE_WEATHERNOW_URL: ${{ secrets.PRIVATE_WEATHERNOW_URL }}
       PRIVATE_WEATHERNOW_TOKEN: ${{ secrets.PRIVATE_WEATHERNOW_TOKEN }}
       GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
       BRAND_NAME: ${{ secrets.BRAND_NAME }}
-
       FTP_HOST: ${{ secrets.FTP_HOST }}
       FTP_USER: ${{ secrets.FTP_USER }}
       FTP_PASS: ${{ secrets.FTP_PASS }}
-
       HSAF_HOST: ${{ secrets.HSAF_HOST }}
       HSAF_USER: ${{ secrets.HSAF_USER }}
       HSAF_PASS: ${{ secrets.HSAF_PASS }}
       HSAF_REMOTE_DIR: ${{ secrets.HSAF_REMOTE_DIR }}
 
     steps:
-      - name: Debug context
-        run: |
-          echo "event=${{ github.event_name }}"
-          echo "ref=${{ github.ref }}"
-          echo "sha=${{ github.sha }}"
-          echo "default_branch=${{ github.event.repository.default_branch }}"
-          date -u +"UTC now: %Y-%m-%d %H:%M:%S"
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -85,94 +74,35 @@ jobs:
           test -f requirements.txt || { echo "requirements.txt missing"; exit 1; }
           test -f greece.geojson.enc || { echo "greece.geojson.enc missing"; exit 1; }
           test -f altitude.zip.enc || { echo "altitude.zip.enc missing"; exit 1; }
-          test -d docs/testmaps || { echo "docs/testmaps missing"; exit 1; }
 
       - name: Decrypt greece.geojson if needed
         if: ${{ hashFiles('greece.geojson') == '' }}
         run: |
           test -f greece.geojson.enc || { echo "greece.geojson.enc missing"; exit 1; }
           test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
-
           openssl enc -d -aes-256-cbc -pbkdf2 \
             -in greece.geojson.enc \
             -out greece.geojson \
             -pass pass:"${GEOJSON_PASS}"
-
-          ls -l greece.geojson
 
       - name: Decrypt + unzip DEM bundle if needed
         if: ${{ hashFiles('GRC_alt.vrt') == '' }}
         run: |
           test -f altitude.zip.enc || { echo "altitude.zip.enc missing"; exit 1; }
           test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
-
           openssl enc -d -aes-256-cbc -pbkdf2 \
             -in altitude.zip.enc \
             -out altitude.zip \
             -pass pass:"${GEOJSON_PASS}"
-
           unzip -o altitude.zip
           rm -f altitude.zip
-
-          test -f GRC_alt.vrt || { echo "GRC_alt.vrt missing after unzip"; ls -la; exit 1; }
-          ls -l GRC_alt.vrt
-
-      - name: Debug PRIVATE_WEATHERNOW_URL response headers
-        run: |
-          python - <<'PY'
-          import os, requests
-
-          url = os.environ.get("PRIVATE_WEATHERNOW_URL", "").strip()
-          token = os.environ.get("PRIVATE_WEATHERNOW_TOKEN", "").strip()
-
-          print("URL set:", bool(url))
-          print("Token set:", bool(token))
-
-          if not url:
-              raise SystemExit("PRIVATE_WEATHERNOW_URL is empty")
-          if not token:
-              raise SystemExit("PRIVATE_WEATHERNOW_TOKEN is empty")
-
-          r = requests.get(
-              url,
-              headers={
-                  "Accept": "text/plain, text/*;q=0.9, */*;q=0.8",
-                  "User-Agent": "Mozilla/5.0",
-                  "X-EKairos-Token": token,
-              },
-              timeout=20,
-          )
-
-          print("Status:", r.status_code)
-          print("Content-Type:", r.headers.get("Content-Type"))
-
-          txt = (r.text or "")
-          print("First 200 chars:", txt[:200].replace("\n", " "))
-
-          r.raise_for_status()
-          PY
+          test -f GRC_alt.vrt || { echo "GRC_alt.vrt missing after unzip"; exit 1; }
 
       - name: Run meteoam.py
         run: |
-          python -V
           python meteoam.py
 
-      - name: Copy PNGs to docs/testmaps
+      - name: Cleanup local outputs
         if: always()
         run: |
-          mkdir -p docs/testmaps
-          if [ -d ptype_hsaf_greece ]; then
-            cp -f ptype_hsaf_greece/*.png docs/testmaps/ 2>/dev/null || true
-          fi
-          ls -la docs/testmaps || true
-
-      - name: Upload meteoam artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: meteoam_outputs
-          path: |
-            ptype_hsaf_greece/**
-            docs/testmaps/**
-          if-no-files-found: warn
-          retention-days: 7
+          rm -rf ptype_hsaf_greece hsaf_cache altitude.zip || true
