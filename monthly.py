@@ -6,6 +6,7 @@ import io
 import zipfile
 import subprocess
 import json
+import builtins
 from io import StringIO
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -30,6 +31,26 @@ from matplotlib.ticker import FuncFormatter, MaxNLocator
 import requests
 import rasterio
 from pyproj import Transformer
+
+# =========================
+# PUBLIC LOG CONTROL
+# =========================
+# GitHub Actions logs are visible in a public repository.
+# Default: keep script output quiet so upload filenames, FTP messages,
+# skipped-region messages, and operational status messages are not printed.
+QUIET_PUBLIC_LOGS = os.environ.get("QUIET_PUBLIC_LOGS", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off"
+)
+
+_real_print = builtins.print
+
+
+def print(*args, **kwargs):
+    if not QUIET_PUBLIC_LOGS:
+        _real_print(*args, **kwargs)
 
 
 # ======================
