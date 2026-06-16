@@ -17,7 +17,8 @@ jobs:
 
     env:
       MPLBACKEND: Agg
-      CURRENTMONTHURL: ${{ secrets.CURRENTMONTHURL }}
+      PRIVATE_CURRENTMONTH_URL:   ${{ secrets.PRIVATE_CURRENTMONTH_URL }}
+      PRIVATE_CURRENTMONTH_TOKEN: ${{ secrets.PRIVATE_CURRENTMONTH_TOKEN }}
       FTP_HOST: ${{ secrets.FTP_HOST }}
       FTP_USER: ${{ secrets.FTP_USER }}
       FTP_PASS: ${{ secrets.FTP_PASS }}
