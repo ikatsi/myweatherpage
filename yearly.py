@@ -749,10 +749,10 @@ response.encoding = "utf-8"
 
 text = response.text.replace("\r\n", "\n").replace("\r", "\n")
 
-print("=== FIRST 20 RESPONSE LINES START ===")
-for i, line in enumerate(text.splitlines()[:20], start=1):
-    print(f"{i:02d}: {line}")
-print("=== FIRST 20 RESPONSE LINES END ===")
+#print("=== FIRST 20 RESPONSE LINES START ===")
+#for i, line in enumerate(text.splitlines()[:20], start=1):
+#    print(f"{i:02d}: {line}")
+#print("=== FIRST 20 RESPONSE LINES END ===")
 
 raw_data = pd.read_csv(
     StringIO(text),
