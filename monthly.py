@@ -35,7 +35,9 @@ from pyproj import Transformer
 # ======================
 # CONFIGURATION
 # ======================
-TXT_URL = os.environ.get("CURRENTMONTHURL", "").strip()
+TXT_URL = os.environ.get("PRIVATE_CURRENTMONTH_URL", "").strip()
+CURRENTMONTH_TOKEN = os.environ.get("PRIVATE_CURRENTMONTH_TOKEN", "").strip()
+
 GEOJSON_PATH = "greece.geojson"
 DEM_PATH = "GRC_alt.vrt"
 
@@ -51,7 +53,10 @@ GRID_N = 300
 TOP_N = 30
 TOP_FONTSIZE = 7.0
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "X-EKairos-Token": CURRENTMONTH_TOKEN,
+}
 TIMEOUT = 15
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__) or ".")
@@ -79,7 +84,10 @@ LAPSE_MIN_NBR = 6
 LAPSE_ALT_RANGE_MIN_M = 150
 
 if not TXT_URL:
-    raise RuntimeError("Environment variable CURRENTMONTHURL is not set.")
+    raise RuntimeError("Environment variable PRIVATE_CURRENTMONTH_URL is not set.")
+
+if not CURRENTMONTH_TOKEN:
+    raise RuntimeError("Environment variable PRIVATE_CURRENTMONTH_TOKEN is not set.")
 
 if not GEOJSON_PASS:
     raise RuntimeError("Environment variable GEOJSON_PASS is not set.")
