@@ -16,7 +16,8 @@ jobs:
     timeout-minutes: 25
     env:
       MPLBACKEND: Agg
-      CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
+      PRIVATE_WEATHERNOW_URL:   ${{ secrets.PRIVATE_WEATHERNOW_URL }}
+      PRIVATE_WEATHERNOW_TOKEN: ${{ secrets.PRIVATE_WEATHERNOW_TOKEN }}
       FTP_HOST:           ${{ secrets.FTP_HOST }}
       FTP_USER:           ${{ secrets.FTP_USER }}
       FTP_PASS:           ${{ secrets.FTP_PASS }}
