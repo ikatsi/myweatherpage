@@ -18,13 +18,14 @@ jobs:
 
     env:
       MPLBACKEND: Agg
-      CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
-      GEOJSON_PASS:       ${{ secrets.GEOJSON_PASS }}
-      FTP_HOST:           ${{ secrets.FTP_HOST }}
-      FTP_USER:           ${{ secrets.FTP_USER }}
-      FTP_PASS:           ${{ secrets.FTP_PASS }}
-      BRAND_NAME:         ${{ secrets.BRAND_NAME }}
-      STATION_EXCLUSION_RULES: ${{ secrets.STATION_EXCLUSION_RULES }}
+      PRIVATE_WEATHERNOW_URL:   ${{ secrets.PRIVATE_WEATHERNOW_URL }}
+      PRIVATE_WEATHERNOW_TOKEN: ${{ secrets.PRIVATE_WEATHERNOW_TOKEN }}
+      GEOJSON_PASS:             ${{ secrets.GEOJSON_PASS }}
+      FTP_HOST:                 ${{ secrets.FTP_HOST }}
+      FTP_USER:                 ${{ secrets.FTP_USER }}
+      FTP_PASS:                 ${{ secrets.FTP_PASS }}
+      BRAND_NAME:               ${{ secrets.BRAND_NAME }}
+      STATION_EXCLUSION_RULES:  ${{ secrets.STATION_EXCLUSION_RULES }}
 
     steps:
       - name: Checkout
