@@ -460,9 +460,8 @@ def fetch_weathernow_text(url: str) -> str:
         try:
             r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
             if r.status_code == 415:
-                ct = r.headers.get("Content-Type", "")
-                print(f"🌧️ 415 Unsupported Media Type (Content-Type={ct})")
-                print("🌧️ First 200 bytes of response:", r.text[:200].replace("\n", " "))
+                raise SystemExit("415 Unsupported Media Type while fetching protected weather feed.")
+    
             r.raise_for_status()
             r.encoding = "utf-8"
             return r.text
