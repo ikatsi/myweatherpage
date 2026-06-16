@@ -40,6 +40,7 @@ import socket
 import zipfile
 import tempfile
 import subprocess
+import builtins
 from io import StringIO
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -72,6 +73,26 @@ import requests
 from netCDF4 import Dataset
 from PIL import Image
 
+# =============================================================================
+# PUBLIC LOG CONTROL
+# =============================================================================
+# GitHub Actions logs are visible in a public repository.
+# Default: keep script output quiet so filenames, paths, H-SAF filenames,
+# FTP messages, saved-output paths, body/cache messages, and prune messages
+# are not printed.
+QUIET_PUBLIC_LOGS = os.environ.get("QUIET_PUBLIC_LOGS", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off"
+)
+
+_real_print = builtins.print
+
+
+def print(*args, **kwargs):
+    if not QUIET_PUBLIC_LOGS:
+        _real_print(*args, **kwargs)
 
 # =============================================================================
 # GLOBAL CONFIG
