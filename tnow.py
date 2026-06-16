@@ -67,7 +67,9 @@ DEM_PATH = os.path.join(BASE_DIR, "GRC_alt.vrt")
 
 # All sensitive values are injected via environment variables by the CI runner.
 # You created these in GitHub → Settings → Secrets and variables → Actions.
-DATA_URL = os.environ.get("CURRENTWEATHER_URL", "").strip()  # your secret name
+DATA_URL = os.environ.get("PRIVATE_WEATHERNOW_URL", "").strip()
+PRIVATE_WEATHERNOW_TOKEN = os.environ.get("PRIVATE_WEATHERNOW_TOKEN", "").strip()
+
 FTP_HOST = os.environ.get("FTP_HOST", "").strip()
 FTP_USER = os.environ.get("FTP_USER", "").strip()
 FTP_PASS = os.environ.get("FTP_PASS", "").strip()  # empty disables uploads
@@ -117,7 +119,9 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.8,el;q=0.7",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
+    "X-EKairos-Token": PRIVATE_WEATHERNOW_TOKEN,
 }
+
 MAX_RETRIES = 5
 DELAY = 10
 TIMEOUT = 20
@@ -259,7 +263,11 @@ def upload_to_ftp(local_file: str) -> None:
 # =========================
 def fetch_text(url: str) -> str:
     if not url:
-        raise SystemExit("CURRENTWEATHER_URL is not set.")
+        raise SystemExit("PRIVATE_WEATHERNOW_URL is not set.")
+
+    if not PRIVATE_WEATHERNOW_TOKEN:
+        raise SystemExit("PRIVATE_WEATHERNOW_TOKEN is not set.")
+
     last_exc = None
 
     def _looks_like_tsv(payload: str) -> bool:
