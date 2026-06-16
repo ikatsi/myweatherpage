@@ -41,6 +41,7 @@ import time
 import socket
 import subprocess
 import zipfile
+import builtins
 from io import StringIO
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -67,6 +68,26 @@ import rasterio
 from pyproj import Transformer
 from common_abbrev import shorten_for_box
 import json
+
+# =========================
+# PUBLIC LOG CONTROL
+# =========================
+# GitHub Actions logs are visible in a public repository.
+# Default: keep script output quiet so station lists, filenames, paths,
+# coverage percentages, and other operational details are not printed.
+QUIET_PUBLIC_LOGS = os.environ.get("QUIET_PUBLIC_LOGS", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off"
+)
+
+_real_print = builtins.print
+
+
+def print(*args, **kwargs):
+    if not QUIET_PUBLIC_LOGS:
+        _real_print(*args, **kwargs)
 
 
 # =========================
