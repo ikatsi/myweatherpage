@@ -20,7 +20,7 @@ Encrypted assets (Greece + EGSA regions only):
   - altitude.zip.enc   -> extracts GRC_alt.vrt (+ .grd/.gri) next to script (password: GEOJSON_PASS)
 
 Feed URL:
-  CURRENTWEATHER_URL must be set.
+  PRIVATE_WEATHERNOW_URL and PRIVATE_WEATHERNOW_TOKEN must be set.
 """
 
 import os
@@ -72,9 +72,13 @@ import requests
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ATHENS_TZ = ZoneInfo("Europe/Athens")
 
-CURRENTWEATHER_URL = os.environ.get("CURRENTWEATHER_URL", "").strip()
+CURRENTWEATHER_URL = os.environ.get("PRIVATE_WEATHERNOW_URL", "").strip()
 if not CURRENTWEATHER_URL:
-    raise SystemExit("❌ CURRENTWEATHER_URL secret/env not set.")
+    raise SystemExit("❌ PRIVATE_WEATHERNOW_URL secret/env not set.")
+
+PRIVATE_WEATHERNOW_TOKEN = os.environ.get("PRIVATE_WEATHERNOW_TOKEN", "").strip()
+if not PRIVATE_WEATHERNOW_TOKEN:
+    raise SystemExit("❌ PRIVATE_WEATHERNOW_TOKEN secret/env not set.")
 
 BRAND_NAME = os.environ.get("BRAND_NAME", "").strip()
 
@@ -320,8 +324,9 @@ def robust_fetch_text(url: str, cache_txt: str, timeout: int = 60, tries: int = 
         ),
         "Accept": "text/plain,text/*;q=0.9,*/*;q=0.8",
         "Connection": "close",
+        "X-EKairos-Token": PRIVATE_WEATHERNOW_TOKEN,
     }
-
+  
     # local file fast path
     if url.startswith("file://"):
         path = url[7:]
@@ -359,7 +364,14 @@ def robust_fetch_text(url: str, cache_txt: str, timeout: int = 60, tries: int = 
     try:
         print("[fetch] falling back to curl...")
         cp = subprocess.run(
-            ["curl", "-L", "-A", headers["User-Agent"], "--max-time", str(timeout), url],
+            [
+                "curl",
+                "-L",
+                "-A", headers["User-Agent"],
+                "-H", "X-EKairos-Token: " + PRIVATE_WEATHERNOW_TOKEN,
+                "--max-time", str(timeout),
+                url
+            ],
             check=True,
             capture_output=True,
             text=True,
