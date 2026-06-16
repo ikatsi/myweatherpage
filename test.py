@@ -1553,33 +1553,54 @@ def run_greece():
             recent = li_plot[ages <= 10]
             older = li_plot[ages > 10]
 
-            if not recent.empty:
-                ax.scatter(
-                    recent["Longitude"].values,
-                    recent["Latitude"].values,
-                    marker="*",
-                    s=70,
-                    facecolors="#ffff00",
-                    edgecolors="black",
-                    linewidths=0.5,
+            # Recent flashes: slightly larger/brighter thunder symbol.
+            for _, r in recent.iterrows():
+                ax.text(
+                    r["Longitude"],
+                    r["Latitude"],
+                    "⚡",
+                    ha="center",
+                    va="center",
+                    fontsize=7,
+                    color="#ffff00",
                     alpha=0.95,
                     zorder=20,
-                    label="MTG-LI αστραπές ≤10 λεπτά"
+                    path_effects=[pe.withStroke(linewidth=1.0, foreground="black")]
                 )
 
-            if not older.empty:
-                ax.scatter(
-                    older["Longitude"].values,
-                    older["Latitude"].values,
-                    marker="*",
-                    s=40,
-                    facecolors="#ffff00",
-                    edgecolors="black",
-                    linewidths=0.4,
+            # Older flashes: smaller/fainter thunder symbol.
+            for _, r in older.iterrows():
+                ax.text(
+                    r["Longitude"],
+                    r["Latitude"],
+                    "⚡",
+                    ha="center",
+                    va="center",
+                    fontsize=5,
+                    color="#ffff00",
                     alpha=0.55,
                     zorder=19,
-                    label=f"MTG-LI αστραπές 10-{LI_LOOKBACK_MIN} λεπτά"
+                    path_effects=[pe.withStroke(linewidth=0.8, foreground="black")]
                 )
+
+            # Invisible handles for legend text only.
+            ax.scatter(
+                [], [],
+                marker="$⚡$",
+                s=70,
+                color="#ffff00",
+                edgecolors="black",
+                label="MTG-LI αστραπές ≤10 λεπτά"
+            )
+            ax.scatter(
+                [], [],
+                marker="$⚡$",
+                s=45,
+                color="#ffff00",
+                edgecolors="black",
+                alpha=0.55,
+                label=f"MTG-LI αστραπές 10-{LI_LOOKBACK_MIN} λεπτά"
+            )
 
             ax.legend(
                 loc="upper right",
@@ -1603,9 +1624,17 @@ def run_greece():
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
     timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M") + f" {athens_abbrev(athens_now)}"
-    left_text = f"Δημιουργήθηκε για το {BRAND_NAME}\n{timestamp_text}\nμε δεδομένα έως και {data_until_str}"
+    eumetsat_disclaimer = "MTG-LI: περιέχει τροποποιημένα δεδομένα EUMETSAT Meteosat"
+    left_text = (
+        f"Δημιουργήθηκε για το {BRAND_NAME}\n"
+        f"{timestamp_text}\n"
+        f"με δεδομένα έως και {data_until_str}\n"
+        f"{eumetsat_disclaimer}"
+    )
+
     if "li_df" in locals() and li_df is not None and not li_df.empty:
-        li_line = f"MTG-LI αστραπές ≤ {LI_LOOKBACK_MIN}′"
+        li_until_str = fmt_data_until(li_df["Datetime"].max())
+        li_line = f"MTG-LI έως {li_until_str}"
     else:
         li_line = "MTG-LI: —"
 
