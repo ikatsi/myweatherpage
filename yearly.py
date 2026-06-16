@@ -37,10 +37,11 @@ from pyproj import Transformer
 # ======================
 # CONFIGURATION
 # ======================
-TXT_URL = os.environ.get("CURRENTYEARURL", "").strip()
+TXT_URL = os.environ.get("PRIVATE_CURRENTYEAR_URL", "").strip()
+CURRENTYEAR_TOKEN = os.environ.get("PRIVATE_CURRENTYEAR_TOKEN", "").strip()
+
 GEOJSON_PATH = "greece.geojson"
 DEM_PATH = "GRC_alt.vrt"
-
 FTP_HOST = os.environ.get("FTP_HOST", "").strip()
 FTP_USER = os.environ.get("FTP_USER", "").strip()
 FTP_PASS = os.environ.get("FTP_PASS", "").strip()
@@ -53,7 +54,10 @@ GRID_N = 300
 TOP_N = 30
 TOP_FONTSIZE = 7.0
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "X-EKairos-Token": CURRENTYEAR_TOKEN,
+}
 TIMEOUT = 15
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__) or ".")
@@ -83,7 +87,10 @@ LAPSE_MIN_NBR = 6
 LAPSE_ALT_RANGE_MIN_M = 150
 
 if not TXT_URL:
-    raise RuntimeError("Environment variable CURRENTYEARURL is not set.")
+    raise RuntimeError("Environment variable PRIVATE_CURRENTYEAR_URL is not set.")
+
+if not CURRENTYEAR_TOKEN:
+    raise RuntimeError("Environment variable PRIVATE_CURRENTYEAR_TOKEN is not set.")
 
 if not GEOJSON_PASS:
     raise RuntimeError("Environment variable GEOJSON_PASS is not set.")
