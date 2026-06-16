@@ -57,5 +57,4 @@ jobs:
 
       - name: Run monthly.py
         run: |
-          python -V
           python monthly.py
