@@ -18,7 +18,8 @@ jobs:
     env:
       MPLBACKEND: Agg
 
-      CURRENTWEATHER_URL: ${{ secrets.CURRENTWEATHER_URL }}
+      PRIVATE_WEATHERNOW_URL:   ${{ secrets.PRIVATE_WEATHERNOW_URL }}
+      PRIVATE_WEATHERNOW_TOKEN: ${{ secrets.PRIVATE_WEATHERNOW_TOKEN }}
       GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
       BRAND_NAME: ${{ secrets.BRAND_NAME }}
 
@@ -116,26 +117,38 @@ jobs:
           test -f GRC_alt.vrt || { echo "GRC_alt.vrt missing after unzip"; ls -la; exit 1; }
           ls -l GRC_alt.vrt
 
-      - name: Debug CURRENTWEATHER_URL response headers
+      - name: Debug PRIVATE_WEATHERNOW_URL response headers
         run: |
           python - <<'PY'
           import os, requests
-          url = os.environ.get("CURRENTWEATHER_URL", "").strip()
+
+          url = os.environ.get("PRIVATE_WEATHERNOW_URL", "").strip()
+          token = os.environ.get("PRIVATE_WEATHERNOW_TOKEN", "").strip()
+
           print("URL set:", bool(url))
+          print("Token set:", bool(token))
+
           if not url:
-              raise SystemExit("CURRENTWEATHER_URL is empty")
+              raise SystemExit("PRIVATE_WEATHERNOW_URL is empty")
+          if not token:
+              raise SystemExit("PRIVATE_WEATHERNOW_TOKEN is empty")
+
           r = requests.get(
               url,
               headers={
                   "Accept": "text/plain, text/*;q=0.9, */*;q=0.8",
-                  "User-Agent": "Mozilla/5.0"
+                  "User-Agent": "Mozilla/5.0",
+                  "X-EKairos-Token": token,
               },
               timeout=20,
           )
+
           print("Status:", r.status_code)
           print("Content-Type:", r.headers.get("Content-Type"))
+
           txt = (r.text or "")
           print("First 200 chars:", txt[:200].replace("\n", " "))
+
           r.raise_for_status()
           PY
 
