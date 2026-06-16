@@ -57,5 +57,4 @@ jobs:
 
       - name: Run yearly.py
         run: |
-          python -V
           python yearly.py
