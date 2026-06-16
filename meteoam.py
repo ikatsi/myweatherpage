@@ -80,9 +80,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ATHENS_TZ = ZoneInfo("Europe/Athens")
 UTC = ZoneInfo("UTC")
 
-CURRENTWEATHER_URL = os.environ.get("CURRENTWEATHER_URL", "").strip()
+CURRENTWEATHER_URL = os.environ.get("PRIVATE_WEATHERNOW_URL", "").strip()
 if not CURRENTWEATHER_URL:
-    raise SystemExit("❌ CURRENTWEATHER_URL secret/env not set.")
+    raise SystemExit("❌ PRIVATE_WEATHERNOW_URL secret/env not set.")
+
+PRIVATE_WEATHERNOW_TOKEN = os.environ.get("PRIVATE_WEATHERNOW_TOKEN", "").strip()
+if not PRIVATE_WEATHERNOW_TOKEN:
+    raise SystemExit("❌ PRIVATE_WEATHERNOW_TOKEN secret/env not set.")
 
 BRAND_NAME = os.environ.get("BRAND_NAME", "").strip() or "e-kairos.gr"
 
@@ -329,6 +333,7 @@ def robust_fetch_text(url: str, cache_txt: str, timeout: int = 60, tries: int = 
         ),
         "Accept": "text/plain,text/*;q=0.9,*/*;q=0.8",
         "Connection": "close",
+        "X-EKairos-Token": PRIVATE_WEATHERNOW_TOKEN,
     }
 
     if url.startswith("file://"):
