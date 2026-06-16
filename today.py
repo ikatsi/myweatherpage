@@ -84,7 +84,8 @@ GEOJSON_ENC = os.path.join(BASE_DIR, "greece.geojson.enc")
 ALT_ENC = os.path.join(BASE_DIR, "altitude.zip.enc")
 ALT_ZIP = os.path.join(BASE_DIR, "altitude.zip")
 
-DATA_URL = os.environ.get("CURRENTWEATHER_URL", "").strip()
+DATA_URL = os.environ.get("PRIVATE_WEATHERNOW_URL", "").strip()
+PRIVATE_WEATHERNOW_TOKEN = os.environ.get("PRIVATE_WEATHERNOW_TOKEN", "").strip()
 FTP_HOST = os.environ.get("FTP_HOST", "").strip()
 FTP_USER = os.environ.get("FTP_USER", "").strip()
 FTP_PASS = os.environ.get("FTP_PASS", "").strip()
@@ -161,6 +162,7 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Accept": "text/plain, text/*;q=0.9, */*;q=0.8",
     "Accept-Encoding": "identity",
+    "X-EKairos-Token": PRIVATE_WEATHERNOW_TOKEN,
 }
 MAX_RETRIES = 5
 DELAY = 10
@@ -426,7 +428,11 @@ def stamp_text(athens_now: datetime) -> str:
 # =========================
 def fetch_weathernow_text(url: str) -> str:
     if not url:
-        raise SystemExit("CURRENTWEATHER_URL is not set.")
+        raise SystemExit("PRIVATE_WEATHERNOW_URL is not set.")
+
+    if not PRIVATE_WEATHERNOW_TOKEN:
+        raise SystemExit("PRIVATE_WEATHERNOW_TOKEN is not set.")
+
     last_exc = None
 
     for i in range(MAX_RETRIES):
