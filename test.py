@@ -805,24 +805,6 @@ def plot_li_overlay_lonlat(ax, li_df, lon_min, lon_max, lat_min, lat_max):
     recent = li_plot[ages <= 10]
     older = li_plot[ages > 10]
 
-    # Tiny centre points: these show the exact plotted coordinates.
-    ax.scatter(
-        older["Longitude"],
-        older["Latitude"],
-        s=5,
-        c="black",
-        alpha=0.65,
-        zorder=30
-    )
-    ax.scatter(
-        recent["Longitude"],
-        recent["Latitude"],
-        s=7,
-        c="black",
-        alpha=0.90,
-        zorder=30
-    )
-
     for _, r in recent.iterrows():
         ax.text(
             r["Longitude"], r["Latitude"], "⚡",
@@ -888,24 +870,6 @@ def plot_li_overlay_projected(ax, li_df, transformer_to_projected, lon_min, lon_
 
     recent = li_plot[ages <= 10]
     older = li_plot[ages > 10]
-
-    # Tiny centre points: these show the exact plotted coordinates.
-    ax.scatter(
-        older["X_plot"],
-        older["Y_plot"],
-        s=5,
-        c="black",
-        alpha=0.65,
-        zorder=30
-    )
-    ax.scatter(
-        recent["X_plot"],
-        recent["Y_plot"],
-        s=7,
-        c="black",
-        alpha=0.90,
-        zorder=30
-    )
 
     for _, r in recent.iterrows():
         ax.text(
