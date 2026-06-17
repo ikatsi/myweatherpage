@@ -464,15 +464,30 @@ def _nc_variables_recursive(ds):
 def _find_nc_var(varmap, candidates):
     """
     Find a NetCDF variable by likely candidate names.
+
+    This deliberately avoids broad substring matches such as:
+        if "lat" in key
+
+    because that can accidentally select the wrong coordinate-like variable.
     """
+    # 1. Exact match first.
     for cand in candidates:
         c = cand.lower()
         if c in varmap:
             return varmap[c]
 
+    # 2. Full-path basename match, e.g. group/flash_latitude.
+    for key, var in varmap.items():
+        base = key.split("/")[-1].lower()
+        for cand in candidates:
+            if base == cand.lower():
+                return var
+
+    # 3. Controlled suffix match only.
     for key, var in varmap.items():
         for cand in candidates:
-            if cand.lower() in key:
+            c = cand.lower()
+            if key.endswith("/" + c):
                 return var
 
     return None
@@ -523,8 +538,14 @@ def _extract_li_flashes_from_nc(nc_path, product_time_utc, lon_min, lon_max, lat
 
         if lat_var is None or lon_var is None:
             print(f"⚡ No obvious LI lat/lon variables in {os.path.basename(nc_path)}")
-            print("   Available variables:", ", ".join(sorted(varmap.keys())[:80]))
+            print("   Available variables:", ", ".join(sorted(varmap.keys())[:120]))
             return pd.DataFrame(columns=["Longitude", "Latitude", "Datetime"])
+
+        print(
+            "⚡ Using LI variables:",
+            "lon =", getattr(lon_var, "name", "unknown"),
+            "| lat =", getattr(lat_var, "name", "unknown")
+        )
 
         lats = _flatten_numeric_var(lat_var)
         lons = _flatten_numeric_var(lon_var)
@@ -784,6 +805,24 @@ def plot_li_overlay_lonlat(ax, li_df, lon_min, lon_max, lat_min, lat_max):
     recent = li_plot[ages <= 10]
     older = li_plot[ages > 10]
 
+    # Tiny centre points: these show the exact plotted coordinates.
+    ax.scatter(
+        older["Longitude"],
+        older["Latitude"],
+        s=5,
+        c="black",
+        alpha=0.65,
+        zorder=18
+    )
+    ax.scatter(
+        recent["Longitude"],
+        recent["Latitude"],
+        s=7,
+        c="black",
+        alpha=0.90,
+        zorder=18
+    )
+
     for _, r in recent.iterrows():
         ax.text(
             r["Longitude"], r["Latitude"], "⚡",
@@ -849,6 +888,24 @@ def plot_li_overlay_projected(ax, li_df, transformer_to_projected, lon_min, lon_
 
     recent = li_plot[ages <= 10]
     older = li_plot[ages > 10]
+
+    # Tiny centre points: these show the exact plotted coordinates.
+    ax.scatter(
+        older["X_plot"],
+        older["Y_plot"],
+        s=5,
+        c="black",
+        alpha=0.65,
+        zorder=18
+    )
+    ax.scatter(
+        recent["X_plot"],
+        recent["Y_plot"],
+        s=7,
+        c="black",
+        alpha=0.90,
+        zorder=18
+    )
 
     for _, r in recent.iterrows():
         ax.text(
