@@ -82,8 +82,8 @@ if not PRIVATE_WEATHERNOW_TOKEN:
 
 BRAND_NAME = os.environ.get("BRAND_NAME", "").strip()
 
-# Optional MTG Lightning Imager overlay for Greece map only.
-# If credentials/packages are missing, the script simply skips lightning and still makes the normal map.
+# Optional MTG Lightning Imager overlay for all produced rain-intensity maps.
+# If credentials/packages are missing, maps are still produced without lightning.
 LI_ENABLED = os.environ.get("LI_ENABLED", "1").strip() == "1"
 LI_COLLECTION_ID = os.environ.get("LI_COLLECTION_ID", "EO:EUM:DAT:0691").strip()
 
@@ -93,11 +93,7 @@ EUMETSAT_CONSUMER_SECRET = os.environ.get("EUMETSAT_CONSUMER_SECRET", "").strip(
 LI_LOOKBACK_MIN = int(os.environ.get("LI_LOOKBACK_MIN", "30"))
 LI_MAX_PRODUCTS = int(os.environ.get("LI_MAX_PRODUCTS", "12"))
 
-# Greece-only plotting/filtering box for lightning points.
-LI_GREECE_LON_MIN = float(os.environ.get("LI_GREECE_LON_MIN", "19.0"))
-LI_GREECE_LON_MAX = float(os.environ.get("LI_GREECE_LON_MAX", "30.0"))
-LI_GREECE_LAT_MIN = float(os.environ.get("LI_GREECE_LAT_MIN", "34.5"))
-LI_GREECE_LAT_MAX = float(os.environ.get("LI_GREECE_LAT_MAX", "42.5"))
+EUMETSAT_ATTRIBUTION = "MTG-LI: περιέχει τροποποιημένα δεδομένα EUMETSAT Meteosat"
 
 EXCLUDE_RAININTENSITY_WEBCODES = {
     "hnms3_megara",
@@ -440,11 +436,15 @@ def print_latest_rows(df: pd.DataFrame, n: int = 8, title: str = ""):
 
 
 # =============================================================================
-# OPTIONAL MTG-LI LIGHTNING HELPERS, GREECE ONLY
+# OPTIONAL MTG-LI LIGHTNING HELPERS
 # =============================================================================
+def _empty_li_df():
+    return pd.DataFrame(columns=["Longitude", "Latitude", "Datetime", "AgeMin"])
+
+
 def _nc_variables_recursive(ds):
     """
-    Return a dict of all variables in a NetCDF file, including variables inside groups.
+    Return all NetCDF variables, including variables inside groups.
     Keys are lower-case full paths and short names.
     """
     out = {}
@@ -463,7 +463,7 @@ def _nc_variables_recursive(ds):
 
 def _find_nc_var(varmap, candidates):
     """
-    Find a NetCDF variable by candidate names, allowing exact and partial matching.
+    Find a NetCDF variable by likely candidate names.
     """
     for cand in candidates:
         c = cand.lower()
@@ -479,9 +479,6 @@ def _find_nc_var(varmap, candidates):
 
 
 def _flatten_numeric_var(var):
-    """
-    Read a NetCDF variable safely and return a flat float array.
-    """
     try:
         arr = np.array(var[:], dtype=float)
         arr = np.ravel(arr)
@@ -491,20 +488,21 @@ def _flatten_numeric_var(var):
         return np.array([], dtype=float)
 
 
-def _extract_li_flashes_from_nc(nc_path, product_time_utc=None):
+def _extract_li_flashes_from_nc(nc_path, product_time_utc, lon_min, lon_max, lat_min, lat_max):
     """
-    Extract lon/lat flash positions from one MTG-LI LFL NetCDF file.
+    Extract MTG-LI flash lon/lat positions from one NetCDF file.
+    Filtering is by rectangular map bbox only, never by land/border masks.
     """
     try:
         import netCDF4
     except Exception as e:
-        print(f"⚠️ netCDF4 not available, cannot read LI file: {e}")
+        print(f"⚡ netCDF4 not available, cannot read LI file: {e}")
         return pd.DataFrame(columns=["Longitude", "Latitude", "Datetime"])
 
     try:
         ds = netCDF4.Dataset(nc_path, "r")
     except Exception as e:
-        print(f"⚠️ Could not open LI NetCDF {os.path.basename(nc_path)}: {e}")
+        print(f"⚡ Could not open LI NetCDF {os.path.basename(nc_path)}: {e}")
         return pd.DataFrame(columns=["Longitude", "Latitude", "Datetime"])
 
     try:
@@ -524,7 +522,7 @@ def _extract_li_flashes_from_nc(nc_path, product_time_utc=None):
         ])
 
         if lat_var is None or lon_var is None:
-            print(f"⚠️ No obvious LI lat/lon variables in {os.path.basename(nc_path)}")
+            print(f"⚡ No obvious LI lat/lon variables in {os.path.basename(nc_path)}")
             print("   Available variables:", ", ".join(sorted(varmap.keys())[:80]))
             return pd.DataFrame(columns=["Longitude", "Latitude", "Datetime"])
 
@@ -541,10 +539,10 @@ def _extract_li_flashes_from_nc(nc_path, product_time_utc=None):
         ok = (
             np.isfinite(lats) &
             np.isfinite(lons) &
-            (lats >= LI_GREECE_LAT_MIN) &
-            (lats <= LI_GREECE_LAT_MAX) &
-            (lons >= LI_GREECE_LON_MIN) &
-            (lons <= LI_GREECE_LON_MAX)
+            (lats >= float(lat_min)) &
+            (lats <= float(lat_max)) &
+            (lons >= float(lon_min)) &
+            (lons <= float(lon_max))
         )
 
         if not np.any(ok):
@@ -588,7 +586,7 @@ def _iter_candidate_nc_files(downloaded_path, work_dir):
                         out.append(os.path.join(root, fn))
             return out
     except Exception as e:
-        print(f"⚠️ Could not inspect LI zip product: {e}")
+        print(f"⚡ Could not inspect LI zip product: {e}")
 
     try:
         import tarfile
@@ -601,7 +599,7 @@ def _iter_candidate_nc_files(downloaded_path, work_dir):
                         out.append(os.path.join(root, fn))
             return out
     except Exception as e:
-        print(f"⚠️ Could not inspect LI tar product: {e}")
+        print(f"⚡ Could not inspect LI tar product: {e}")
 
     return out
 
@@ -634,16 +632,17 @@ def _product_time_utc(product):
     return datetime.now(ZoneInfo("UTC"))
 
 
-def fetch_mtg_li_flashes_greece(athens_now):
+def fetch_mtg_li_flashes_bbox(athens_now, lon_min, lon_max, lat_min, lat_max):
     """
-    Fetch recent MTG-LI LFL flashes from EUMETSAT Data Store.
+    Fetch recent MTG-LI LFL flashes for a rectangular bbox.
 
-    Returns a DataFrame with:
+    Returns columns:
       Longitude, Latitude, Datetime, AgeMin
 
-    If EUMETSAT credentials or packages are missing, returns an empty DataFrame.
+    The bbox is intentionally rectangular. Flashes over sea and just outside land
+    borders remain visible if they are inside the map box.
     """
-    empty = pd.DataFrame(columns=["Longitude", "Latitude", "Datetime", "AgeMin"])
+    empty = _empty_li_df()
 
     if not LI_ENABLED:
         print("⚡ MTG-LI overlay disabled by LI_ENABLED=0.")
@@ -678,7 +677,10 @@ def fetch_mtg_li_flashes_greece(athens_now):
             return empty
 
         products = sorted(products, key=_product_time_utc, reverse=True)[:LI_MAX_PRODUCTS]
-        print(f"⚡ MTG-LI products to inspect: {len(products)}")
+        print(
+            f"⚡ MTG-LI products to inspect for "
+            f"lon[{lon_min},{lon_max}] lat[{lat_min},{lat_max}]: {len(products)}"
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             for pidx, product in enumerate(products, start=1):
@@ -701,20 +703,27 @@ def fetch_mtg_li_flashes_greece(athens_now):
                         nc_files = [download_path]
 
                     for nc in nc_files:
-                        one = _extract_li_flashes_from_nc(nc, product_time_utc=ptime)
+                        one = _extract_li_flashes_from_nc(
+                            nc,
+                            product_time_utc=ptime,
+                            lon_min=lon_min,
+                            lon_max=lon_max,
+                            lat_min=lat_min,
+                            lat_max=lat_max,
+                        )
                         if not one.empty:
                             frames.append(one)
 
                 except Exception as e:
-                    print(f"⚠️ Failed to process one MTG-LI product: {e}")
+                    print(f"⚡ Failed to process one MTG-LI product: {e}")
                     continue
 
     except Exception as e:
-        print(f"⚠️ MTG-LI fetch failed: {e}")
+        print(f"⚡ MTG-LI fetch failed: {e}")
         return empty
 
     if not frames:
-        print("⚡ No Greece-box LI flashes extracted.")
+        print("⚡ No LI flashes extracted for this map bbox.")
         return empty
 
     out = pd.concat(frames, ignore_index=True)
@@ -732,20 +741,152 @@ def fetch_mtg_li_flashes_greece(athens_now):
     out = out[out["Datetime"] >= start_athens].copy()
 
     if out.empty:
-        print("⚡ LI flashes existed, but none survived final time/Greece filter.")
+        print("⚡ LI flashes existed, but none survived final time filter.")
         return empty
 
     out["AgeMin"] = (athens_now - out["Datetime"]).dt.total_seconds() / 60.0
     out = out[(out["AgeMin"] >= 0) & (out["AgeMin"] <= LI_LOOKBACK_MIN)].copy()
 
+    # De-duplicate approximate repeated points from overlapping products.
     out["lon_round"] = out["Longitude"].round(4)
     out["lat_round"] = out["Latitude"].round(4)
     out["time_round"] = out["Datetime"].dt.round("1min")
     out = out.drop_duplicates(subset=["lon_round", "lat_round", "time_round"]).copy()
     out = out.drop(columns=["lon_round", "lat_round", "time_round"], errors="ignore")
 
-    print(f"⚡ MTG-LI Greece flashes plotted: {len(out)}")
+    print(f"⚡ MTG-LI flashes extracted for this map: {len(out)}")
     return out
+
+
+def li_footer_line(li_df):
+    if li_df is not None and not li_df.empty:
+        return f"MTG-LI έως {fmt_data_until(li_df['Datetime'].max())}"
+    return "MTG-LI: —"
+
+
+def plot_li_overlay_lonlat(ax, li_df, lon_min, lon_max, lat_min, lat_max):
+    """
+    Plot MTG-LI flashes in lon/lat coordinates.
+    No land-border mask is applied.
+    """
+    if li_df is None or li_df.empty:
+        return
+
+    li_plot = li_df[
+        li_df["Longitude"].between(float(lon_min), float(lon_max)) &
+        li_df["Latitude"].between(float(lat_min), float(lat_max))
+    ].copy()
+
+    if li_plot.empty:
+        return
+
+    ages = li_plot["AgeMin"].astype(float).clip(lower=0, upper=LI_LOOKBACK_MIN)
+    recent = li_plot[ages <= 10]
+    older = li_plot[ages > 10]
+
+    for _, r in recent.iterrows():
+        ax.text(
+            r["Longitude"], r["Latitude"], "⚡",
+            ha="center", va="center",
+            fontsize=7,
+            color="#ffff00",
+            alpha=0.95,
+            zorder=20,
+            path_effects=[pe.withStroke(linewidth=1.0, foreground="black")]
+        )
+
+    for _, r in older.iterrows():
+        ax.text(
+            r["Longitude"], r["Latitude"], "⚡",
+            ha="center", va="center",
+            fontsize=5,
+            color="#ffff00",
+            alpha=0.55,
+            zorder=19,
+            path_effects=[pe.withStroke(linewidth=0.8, foreground="black")]
+        )
+
+    from matplotlib.lines import Line2D
+    handles = [
+        Line2D([], [], linestyle="None", label="⚡ MTG-LI ανιχνεύσεις, προϊόν ≤10′"),
+        Line2D([], [], linestyle="None", label=f"⚡ MTG-LI ανιχνεύσεις, προϊόν 10-{LI_LOOKBACK_MIN}′"),
+    ]
+    ax.legend(
+        handles=handles,
+        loc="upper right",
+        fontsize=7,
+        frameon=True,
+        framealpha=0.75,
+        borderpad=0.4,
+        handlelength=0,
+        handletextpad=0.2
+    )
+
+
+def plot_li_overlay_projected(ax, li_df, transformer_to_projected, lon_min, lon_max, lat_min, lat_max):
+    """
+    Plot MTG-LI flashes on a projected map.
+    No land-border mask is applied.
+    """
+    if li_df is None or li_df.empty:
+        return
+
+    li_plot = li_df[
+        li_df["Longitude"].between(float(lon_min), float(lon_max)) &
+        li_df["Latitude"].between(float(lat_min), float(lat_max))
+    ].copy()
+
+    if li_plot.empty:
+        return
+
+    ages = li_plot["AgeMin"].astype(float).clip(lower=0, upper=LI_LOOKBACK_MIN)
+    xs, ys = transformer_to_projected.transform(
+        li_plot["Longitude"].values.tolist(),
+        li_plot["Latitude"].values.tolist()
+    )
+    li_plot["X_plot"] = np.asarray(xs, dtype=float)
+    li_plot["Y_plot"] = np.asarray(ys, dtype=float)
+
+    recent = li_plot[ages <= 10]
+    older = li_plot[ages > 10]
+
+    for _, r in recent.iterrows():
+        ax.text(
+            r["X_plot"], r["Y_plot"], "⚡",
+            ha="center", va="center",
+            fontsize=7,
+            color="#ffff00",
+            alpha=0.95,
+            zorder=20,
+            path_effects=[pe.withStroke(linewidth=1.0, foreground="black")]
+        )
+
+    for _, r in older.iterrows():
+        ax.text(
+            r["X_plot"], r["Y_plot"], "⚡",
+            ha="center", va="center",
+            fontsize=5,
+            color="#ffff00",
+            alpha=0.55,
+            zorder=19,
+            path_effects=[pe.withStroke(linewidth=0.8, foreground="black")]
+        )
+
+    from matplotlib.lines import Line2D
+    handles = [
+        Line2D([], [], linestyle="None", label="⚡ MTG-LI ανιχνεύσεις, προϊόν ≤10′"),
+        Line2D([], [], linestyle="None", label=f"⚡ MTG-LI ανιχνεύσεις, προϊόν 10-{LI_LOOKBACK_MIN}′"),
+    ]
+    ax.legend(
+        handles=handles,
+        loc="upper right",
+        fontsize=7,
+        frameon=True,
+        framealpha=0.75,
+        borderpad=0.4,
+        handlelength=0,
+        handletextpad=0.2
+    )
 
 
 # =============================================================================
@@ -1387,9 +1528,13 @@ def run_greece():
     data_until = df["Datetime"].max()
     data_until_str = fmt_data_until(data_until)
 
-    # Optional MTG-LI lightning data, Greece map only.
-    # This is independent of all rain/snow calculations below.
-    li_df = fetch_mtg_li_flashes_greece(athens_now)
+    # Optional MTG-LI lightning for Greece map.
+    # Rectangular bbox only: sea and just-outside-border flashes remain visible.
+    li_df = fetch_mtg_li_flashes_bbox(
+        athens_now,
+        GRID_LON_MIN, GRID_LON_MAX,
+        GRID_LAT_MIN, GRID_LAT_MAX
+    )
 
     rain_df = prepare_rainintensity_data(df)
     if rain_df.empty:
@@ -1538,78 +1683,12 @@ def run_greece():
                 path_effects=[pe.withStroke(linewidth=1.2, foreground="white")]
             )
 
-    # MTG-LI lightning overlay, Greece only.
-    # This does not affect rain interpolation, contours, snow masks, snow labels or colourbar.
-    if "li_df" in locals() and li_df is not None and not li_df.empty:
-        li_plot = li_df.copy()
-
-        li_plot = li_plot[
-            li_plot["Longitude"].between(GRID_LON_MIN, GRID_LON_MAX) &
-            li_plot["Latitude"].between(GRID_LAT_MIN, GRID_LAT_MAX)
-        ].copy()
-
-        if not li_plot.empty:
-            ages = li_plot["AgeMin"].astype(float).clip(lower=0, upper=LI_LOOKBACK_MIN)
-            recent = li_plot[ages <= 10]
-            older = li_plot[ages > 10]
-
-            # Recent flashes: slightly larger/brighter thunder symbol.
-            for _, r in recent.iterrows():
-                ax.text(
-                    r["Longitude"],
-                    r["Latitude"],
-                    "⚡",
-                    ha="center",
-                    va="center",
-                    fontsize=7,
-                    color="#ffff00",
-                    alpha=0.95,
-                    zorder=20,
-                    path_effects=[pe.withStroke(linewidth=1.0, foreground="black")]
-                )
-
-            # Older flashes: smaller/fainter thunder symbol.
-            for _, r in older.iterrows():
-                ax.text(
-                    r["Longitude"],
-                    r["Latitude"],
-                    "⚡",
-                    ha="center",
-                    va="center",
-                    fontsize=5,
-                    color="#ffff00",
-                    alpha=0.55,
-                    zorder=19,
-                    path_effects=[pe.withStroke(linewidth=0.8, foreground="black")]
-                )
-
-            # Invisible handles for legend text only.
-            ax.scatter(
-                [], [],
-                marker="$⚡$",
-                s=70,
-                color="#ffff00",
-                edgecolors="black",
-                label="MTG-LI αστραπές ≤10 λεπτά"
-            )
-            ax.scatter(
-                [], [],
-                marker="$⚡$",
-                s=45,
-                color="#ffff00",
-                edgecolors="black",
-                alpha=0.55,
-                label=f"MTG-LI αστραπές 10-{LI_LOOKBACK_MIN} λεπτά"
-            )
-
-            ax.legend(
-                loc="upper right",
-                fontsize=7,
-                frameon=True,
-                framealpha=0.75,
-                borderpad=0.4,
-                handletextpad=0.4
-            )
+    # MTG-LI lightning overlay. No land-border mask is applied to lightning.
+    plot_li_overlay_lonlat(
+        ax, li_df,
+        GRID_LON_MIN, GRID_LON_MAX,
+        GRID_LAT_MIN, GRID_LAT_MAX
+    )
 
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="3%", pad=0.1)
@@ -1624,24 +1703,16 @@ def run_greece():
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
     timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M") + f" {athens_abbrev(athens_now)}"
-    eumetsat_disclaimer = "MTG-LI: περιέχει τροποποιημένα δεδομένα EUMETSAT Meteosat"
     left_text = (
         f"Δημιουργήθηκε για το {BRAND_NAME}\n"
         f"{timestamp_text}\n"
         f"με δεδομένα έως και {data_until_str}\n"
-        f"{eumetsat_disclaimer}"
+        f"{EUMETSAT_ATTRIBUTION}"
     )
-
-    if "li_df" in locals() and li_df is not None and not li_df.empty:
-        li_until_str = fmt_data_until(li_df["Datetime"].max())
-        li_line = f"MTG-LI έως {li_until_str}"
-    else:
-        li_line = "MTG-LI: —"
-
     right_text = (
         f"v4.0-local\n"
         f"Χιονόπτωση ≤ {SNOW_T_C:.1f}°C\n"
-        f"{li_line}\n"
+        f"{li_footer_line(li_df)}\n"
         f"Συνολ. βαροβαθμιδα: {b_global*1000:.2f} °C/km"
     )
 
@@ -1682,12 +1753,974 @@ def run_greece():
         print(f"⚠️ FTP upload/prune failed: {e}")
 
 
+# =============================================================================
+# REGION RUNNERS: EGSA GENERIC (Attica/Crete/NE Greece/SW Greece)
+# =============================================================================
+def run_egsa_region(cfg: dict):
+    """
+    cfg keys:
+      name, bbox (lon_min, lon_max, lat_min, lat_max),
+      prefix, latest_name,
+      time_window_min,
+      grid_n,
+      idw: power, k, max_distance_m, distance_mask_m,
+      snow: min_sep_m, max_snowflakes, fontsize, stroke_w, seed,
+      labels: every_n, min_sep_m, y_offset_m, fontsize,
+      footer_version
+    """
+    print("\n====================")
+    print(f"RUN: {cfg['name']} (EGSA87 EPSG:2100)")
+    print("====================")
+
+    ensure_geojson_and_altitude_bundle()
+    if not os.path.exists(GREECE_GEOJSON_PATH):
+        print(f"❌ Missing: {GREECE_GEOJSON_PATH}")
+        return
+    if not os.path.exists(ALT_VRT_PATH):
+        print(f"❌ Missing: {ALT_VRT_PATH}")
+        return
+
+    CRS_WGS84 = "EPSG:4326"
+    CRS_EGSA87 = "EPSG:2100"
+
+    lon_min, lon_max, lat_min, lat_max = cfg["bbox"]
+    GRID_N = int(cfg.get("grid_n", 300))
+
+    # transforms
+    wgs_to_egsa = Transformer.from_crs(CRS_WGS84, CRS_EGSA87, always_xy=True)
+    egsa_to_wgs = Transformer.from_crs(CRS_EGSA87, CRS_WGS84, always_xy=True)
+
+    # bbox corners to EGSA
+    corners_lon = [lon_min, lon_min, lon_max, lon_max]
+    corners_lat = [lat_min, lat_max, lat_min, lat_max]
+    corners_x, corners_y = wgs_to_egsa.transform(corners_lon, corners_lat)
+    x_min, x_max = float(np.min(corners_x)), float(np.max(corners_x))
+    y_min, y_max = float(np.min(corners_y)), float(np.max(corners_y))
+
+    output_dir = os.path.join(BASE_DIR, "rainintensitymaps")
+    os.makedirs(output_dir, exist_ok=True)
+    cache_txt = os.path.join(BASE_DIR, "weathernow_cached.txt")
+
+    # fetch
+    try:
+        text, source = robust_fetch_text(CURRENTWEATHER_URL, cache_txt=cache_txt, timeout=60, tries=6)
+        print("source:", source)
+        with open(cache_txt, "w", encoding="utf-8") as f:
+            f.write(text)
+    except Exception as e:
+        print(f"❌ Failed to fetch data: {e}")
+        return
+
+    df = load_and_clean_feed(text, lon_min=19, lon_max=30)
+
+    print(f"📥 Raw(cleaned) rows: {len(df)}")
+
+    # time filter
+    athens_now = datetime.now(ATHENS_TZ)
+    tw = int(cfg.get("time_window_min", 45))
+    time_threshold = athens_now - timedelta(minutes=tw)
+
+    print("athens_now:", athens_now)
+    print("max file datetime:", df["Datetime"].max())
+    print("min file datetime:", df["Datetime"].min())
+    print("time_threshold:", time_threshold)
+
+    before = len(df)
+    df = df[df["Datetime"] >= time_threshold].copy()
+    print(f"⏱️ time filter (last {tw} min): {before} -> {len(df)} (removed {before - len(df)})")
+
+    # Greece only if column exists
+    if "Country" in df.columns:
+        c = df["Country"].astype(str).str.strip().str.upper()
+        df = df[c.isin(["GR", "GREECE"])].copy()
+
+    if df.empty:
+        print("⚠️ No data points available within the time window. Exiting.")
+        return
+
+    # Optional MTG-LI lightning for this EGSA map.
+    # Rectangular bbox only: sea and just-outside-border flashes remain visible.
+    li_df = fetch_mtg_li_flashes_bbox(
+        athens_now,
+        lon_min, lon_max,
+        lat_min, lat_max
+    )
+
+    # station arrays
+    rain_df = prepare_rainintensity_data(df)
+
+    if rain_df.empty:
+      print("⚠️ No rain-intensity stations left after exclusions.")
+      return
+
+    lats = rain_df["Latitude"].values.astype(float)
+    lons = rain_df["Longitude"].values.astype(float)
+    intens = rain_df["RainIntensity"].values.astype(float)
+    
+    # keep temperature inputs from full df
+    temp_lats = df["Latitude"].values.astype(float)
+    temp_lons = df["Longitude"].values.astype(float)
+    tnow = df["TNow"].values.astype(float)
+    
+    # project rain stations to EGSA
+    st_x, st_y = wgs_to_egsa.transform(lons.tolist(), lats.tolist())
+    st_x = np.asarray(st_x, dtype=float)
+    st_y = np.asarray(st_y, dtype=float)
+    
+    # project temp stations separately
+    temp_x, temp_y = wgs_to_egsa.transform(temp_lons.tolist(), temp_lats.tolist())
+    temp_x = np.asarray(temp_x, dtype=float)
+    temp_y = np.asarray(temp_y, dtype=float)
+
+    # grid in EGSA meters
+    grid_x_m, grid_y_m = np.meshgrid(
+        np.linspace(x_min, x_max, GRID_N),
+        np.linspace(y_min, y_max, GRID_N)
+    )
+
+    # load greece geometry in EGSA, clip to bbox
+    greece = gpd.read_file(GREECE_GEOJSON_PATH)
+    if greece.crs is None:
+        raise RuntimeError("Greece GeoJSON has no CRS.")
+    if greece.crs.to_string() != CRS_EGSA87:
+        greece = greece.to_crs(CRS_EGSA87)
+
+    bbox_poly = box(x_min, y_min, x_max, y_max)
+    bbox_gdf = gpd.GeoDataFrame(geometry=[bbox_poly], crs=CRS_EGSA87)
+
+    try:
+        greece_clip = gpd.clip(greece, bbox_gdf)
+    except Exception as e:
+        print(f"⚠️ gpd.clip failed ({e}); plotting full Greece but forcing view limits.")
+        greece_clip = greece
+
+    grid_points = gpd.GeoDataFrame(
+        geometry=gpd.points_from_xy(grid_x_m.ravel(), grid_y_m.ravel()),
+        crs=CRS_EGSA87
+    )
+    try:
+        boundary = greece_clip.geometry.union_all()
+    except AttributeError:
+        boundary = greece_clip.geometry.unary_union
+    geo_mask = grid_points.geometry.within(boundary).values.reshape(grid_x_m.shape)
+
+    # distance mask in meters
+    dist_mask_m = float(cfg["idw"]["distance_mask_m"])
+    st_tree = cKDTree(np.c_[st_x, st_y])
+    dists, _ = st_tree.query(np.c_[grid_x_m.ravel(), grid_y_m.ravel()])
+    distance_mask = dists.reshape(grid_x_m.shape) <= dist_mask_m
+
+    final_mask = geo_mask & distance_mask
+
+    # interpolate intensity (IDW in meters)
+    grid_intensity = idw_any_neighbor(
+        st_x, st_y, intens,
+        grid_x_m, grid_y_m,
+        power=float(cfg["idw"]["power"]),
+        max_distance=float(cfg["idw"]["max_distance_m"]),
+        k=int(cfg["idw"]["k"])
+    )
+
+    masked_intensity = np.full(grid_x_m.shape, np.nan, dtype=float)
+    masked_intensity[final_mask] = grid_intensity[final_mask]
+
+    # temperature local regression
+    station_alt = sample_altitude_vrt_m(ALT_VRT_PATH, temp_lons, temp_lats)
+    grid_tnow, grid_b, grid_a, b_global = build_temperature_grid_local_lr_projected(
+        grid_x_m, grid_y_m,
+        temp_x, temp_y,
+        tnow, station_alt,
+        egsa_to_wgs,
+        ALT_VRT_PATH,
+        x_min, x_max, y_min, y_max,
+        grid_n=GRID_N
+    )
+
+    snow_mask = (
+        final_mask &
+        np.isfinite(masked_intensity) &
+        np.isfinite(grid_tnow) &
+        (masked_intensity > RAIN_THRESH) &
+        (grid_tnow <= SNOW_T_C)
+    )
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        iso_alt_m = (SNOW_T_C - grid_a) / grid_b
+    iso_alt_m = np.where(np.isfinite(iso_alt_m), iso_alt_m, np.nan)
+    iso_alt_m = np.clip(iso_alt_m, ISO_ALT_MIN_M, ISO_ALT_MAX_M)
+
+    # output
+    ts = athens_now.strftime("%Y-%m-%d-%H-%M")
+    prefix = cfg["prefix"]
+    latest_name = cfg["latest_name"]
+    out_png = os.path.join(output_dir, f"{prefix}{ts}.png")
+    out_latest = os.path.join(output_dir, latest_name)
+
+    # plot
+    fig, ax = plt.subplots(figsize=(10, 10), dpi=300)
+    arr = ma.masked_invalid(masked_intensity)
+
+    img = ax.imshow(
+        arr,
+        extent=(x_min, x_max, y_min, y_max),
+        origin="lower",
+        cmap=CMAP_GREECE_EGSA,
+        norm=NORM_GREECE_EGSA,
+        alpha=0.7
+    )
+
+    greece_clip.boundary.plot(ax=ax, color="black", linewidth=0.5)
+
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_aspect("equal", adjustable="box")
+
+    # show lon/lat degrees on axes (labels only)
+    from matplotlib.ticker import FuncFormatter, MaxNLocator
+    y_ref_for_lon = y_min
+    x_ref_for_lat = x_min
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+
+    def fmt_lon(x, pos):
+        lon, _lat = egsa_to_wgs.transform(x, y_ref_for_lon)
+        return f"{lon:.2f}"
+
+    def fmt_lat(y, pos):
+        _lon, lat = egsa_to_wgs.transform(x_ref_for_lat, y)
+        return f"{lat:.2f}"
+
+    ax.xaxis.set_major_formatter(FuncFormatter(fmt_lon))
+    ax.yaxis.set_major_formatter(FuncFormatter(fmt_lat))
+    ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
+    ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
+
+    contour_levels = [0.1, 2, 6, 36, 100]
+    ax.contour(grid_x_m, grid_y_m, masked_intensity, levels=contour_levels, colors="black", linewidths=1)
+
+    # snowflakes
+    snow_cfg = cfg["snow"]
+    sx, sy = downsample_mask_points(
+        grid_x_m, grid_y_m, snow_mask,
+        max_points=int(snow_cfg.get("max_snowflakes", DEFAULT_MAX_SNOWFLAKES)),
+        min_sep=float(snow_cfg.get("min_sep_m", 4500.0)),
+        seed=int(snow_cfg.get("seed", DEFAULT_SNOW_SEED))
+    )
+
+    for x, y in zip(sx, sy):
+        ax.text(
+            x, y, "❄",
+            ha="center", va="center",
+            fontsize=float(snow_cfg.get("fontsize", DEFAULT_SNOW_FONTSIZE)),
+            color="black",
+            path_effects=[pe.withStroke(linewidth=float(snow_cfg.get("stroke_w", DEFAULT_SNOW_STROKE_W)), foreground="white")]
+        )
+
+    if len(sx) > 0:
+        print(f"❄ Snow flags placed at {len(sx)} point(s).")
+    else:
+        print("❄ No snow grid points found with current thresholds.")
+
+    # labels with crowd-control
+    lab_cfg = cfg["labels"]
+    if len(sx) > 0:
+        x_axis = grid_x_m[0, :]
+        y_axis = grid_y_m[:, 0]
+
+        every_n = int(lab_cfg.get("every_n", DEFAULT_LABEL_EVERY_N))
+        min_sep = float(lab_cfg.get("min_sep_m", 12000.0))
+        y_off = float(lab_cfg.get("y_offset_m", 3000.0))
+        fz = float(lab_cfg.get("fontsize", DEFAULT_LABEL_FONTSIZE))
+
+        label_pts = []
+        label_tree = None
+
+        for k, (x, y) in enumerate(zip(sx, sy)):
+            if every_n > 1 and (k % every_n) != 0:
+                continue
+
+            if min_sep and label_tree is not None and len(label_pts) > 0:
+                d, _ = label_tree.query([x, y], k=1)
+                if d < min_sep:
+                    continue
+
+            j = int(np.argmin(np.abs(x_axis - x)))
+            i = int(np.argmin(np.abs(y_axis - y)))
+
+            z = iso_alt_m[i, j]
+            if not np.isfinite(z):
+                continue
+
+            z_round = int(round(z / ISO_ALT_ROUND_M) * ISO_ALT_ROUND_M)
+            ax.text(
+                x, y - y_off,
+                f"{z_round}m+",
+                ha="center", va="top",
+                fontsize=fz,
+                color="black",
+                path_effects=[pe.withStroke(linewidth=1.2, foreground="white")]
+            )
+
+            label_pts.append([x, y])
+            if len(label_pts) == 1 or (len(label_pts) % 50 == 0):
+                label_tree = cKDTree(np.array(label_pts))
+
+    # MTG-LI lightning overlay. No land-border mask is applied to lightning.
+    plot_li_overlay_projected(
+        ax, li_df, wgs_to_egsa,
+        lon_min, lon_max,
+        lat_min, lat_max
+    )
+
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="3%", pad=0.1)
+    cbar = plt.colorbar(img, cax=cax, boundaries=BOUNDS_GREECE_EGSA, extend="both")
+    cbar.set_ticks([2, 6, 36, 100])
+    cbar.set_ticklabels(["2", "6", "36", "100"])
+    cbar.set_label("Ραγδαιότητα υετού (mm/h)", fontsize=12)
+
+    ax.set_title("Υπολογ. τελευταία διαθέσιμη ραγδαιότητα υετού", fontsize=14, pad=10, loc="center")
+    ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
+
+    timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M") + f" {athens_abbrev(athens_now)}"
+    left_text = (
+        f"Δημιουργήθηκε για το {BRAND_NAME}\n"
+        f"{timestamp_text}\n"
+        f"με δεδομένα έως και {fmt_data_until(df['Datetime'].max())}\n"
+        f"{EUMETSAT_ATTRIBUTION}"
+    )
+    right_text = (
+        f"{cfg.get('footer_version','v4.x-egsa2100')}\n"
+        f"Χιονόπτωση ≤ {SNOW_T_C:.1f}°C\n"
+        f"{li_footer_line(li_df)}\n"
+        f"Συνολ. βαροβαθμιδα: {b_global*1000:.2f} °C/km"
+    )
+
+    ax.text(
+        0.01, 0.01, left_text,
+        transform=ax.transAxes,
+        fontsize=8,
+        color="black",
+        ha="left",
+        va="bottom",
+        bbox=transparent_bbox(pad=0.3, rounded=True)
+    )
+    ax.text(
+        0.99, 0.01, right_text,
+        transform=ax.transAxes,
+        fontsize=8,
+        color="black",
+        ha="right",
+        va="bottom",
+        bbox=transparent_bbox(pad=0.3, rounded=True)
+    )
+
+    plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
+
+    plt.savefig(out_png, dpi=300, bbox_inches="tight", pad_inches=0)
+    shutil.copy(out_png, out_latest)
+    plt.close(fig)
+
+    print(f"✅ Saved: {out_png}")
+    print(f"✅ Saved: {out_latest}")
+
+    # FTP
+    try:
+        ftp_upload_file(out_png)
+        ftp_upload_file(out_latest)
+        ftp_prune_timestamped(prefix=prefix, latest_name=latest_name, keep=int(cfg.get("remote_keep", 216)))
+    except Exception as e:
+        print(f"⚠️ FTP upload/prune failed: {e}")
+
 
 # =============================================================================
-# MAIN, GREECE ONLY TEST ENTRYPOINT
+# REGION RUNNER: CYPRUS (UTM 36N)
+# =============================================================================
+def bounds_reasonable(geom, lon_min=31.0, lon_max=36.0, lat_min=34.0, lat_max=36.5):
+    try:
+        minx, miny, maxx, maxy = geom.bounds
+        return (lon_min <= minx <= lon_max) and (lon_min <= maxx <= lon_max) and \
+               (lat_min <= miny <= lat_max) and (lat_min <= maxy <= lat_max)
+    except Exception:
+        return False
+
+def swap_geom(geom):
+    if isinstance(geom, Polygon):
+        x, y = geom.exterior.xy
+        return Polygon(np.column_stack([y, x]))
+    if isinstance(geom, MultiPolygon):
+        return MultiPolygon([swap_geom(g) for g in geom.geoms])
+    return geom
+
+def plot_boundary_proj(ax, geom, linewidth=0.5, color="black"):
+    if isinstance(geom, Polygon):
+        x, y = geom.exterior.xy
+        ax.plot(x, y, linewidth=linewidth, color=color, zorder=3)
+    elif isinstance(geom, MultiPolygon):
+        for poly in geom.geoms:
+            x, y = poly.exterior.xy
+            ax.plot(x, y, linewidth=linewidth, color=color, zorder=3)
+
+def run_cyprus():
+    print("\n====================")
+    print("RUN: Cyprus (UTM 36N)")
+    print("====================")
+
+    if not os.path.exists(CYPRUS_GEOJSON_PATH):
+        print("❌ cyprus.geojson not found (decrypt cyprus.geojson.enc before running).")
+        return
+    if not os.path.exists(CYPRUS_ALT_TIF_PATH):
+        print(f"❌ Missing altitude GeoTIFF: {CYPRUS_ALT_TIF_PATH}")
+        return
+
+    # Cyprus config (from your script)
+    CRS_WGS84 = "EPSG:4326"
+    CRS_UTM = "EPSG:32636"
+    GRID_N = 300
+
+    # bbox for station filtering
+    LON_MIN, LON_MAX = 32.0, 34.9
+    LAT_MIN, LAT_MAX = 34.4, 35.9
+
+    TIME_WINDOW_MIN = 30
+
+    IDW_POWER = 2
+    IDW_K = 8
+    MAX_DISTANCE_M = 40000.0
+    DISTANCE_MASK_M = 40000.0
+
+    MIN_SEP_M = 1500.0
+    MAX_SNOWFLAKES = DEFAULT_MAX_SNOWFLAKES
+    SNOW_SEED = DEFAULT_SNOW_SEED
+    SNOW_FONTSIZE = DEFAULT_SNOW_FONTSIZE
+    SNOW_STROKE_W = DEFAULT_SNOW_STROKE_W
+
+    LABEL_EVERY_N = 10
+    LABEL_MIN_SEP_M = 12000.0
+    LABEL_Y_OFFSET_M = 2500.0
+    LABEL_FONTSIZE = 7
+    LABEL_STROKE_W = 1.2
+
+    output_dir = os.path.join(BASE_DIR, "cyprusrainintensitymaps")
+    os.makedirs(output_dir, exist_ok=True)
+    cache_txt = os.path.join(BASE_DIR, "weathernow_cyprus_cached.txt")
+
+    # Load boundary
+    cyprus = gpd.read_file(CYPRUS_GEOJSON_PATH)
+    if cyprus.crs is None:
+        cyprus = cyprus.set_crs(epsg=4326)
+    cyprus = cyprus[~cyprus.geometry.is_empty]
+    if not cyprus.geometry.is_valid.all():
+        cyprus.geometry = cyprus.buffer(0)
+
+    try:
+        cyprus_boundary_ll = cyprus.union_all()
+    except AttributeError:
+        cyprus_boundary_ll = unary_union(cyprus.geometry)
+
+    # Fix possible lat/lon swapped
+    if not bounds_reasonable(cyprus_boundary_ll):
+        cyprus.geometry = cyprus.geometry.apply(swap_geom)
+        try:
+            cyprus_boundary_ll = cyprus.union_all()
+        except AttributeError:
+            cyprus_boundary_ll = unary_union(cyprus.geometry)
+
+    cyprus_utm = cyprus.to_crs(CRS_UTM)
+    try:
+        cyprus_boundary_utm = cyprus_utm.union_all()
+    except AttributeError:
+        cyprus_boundary_utm = unary_union(cyprus_utm.geometry)
+
+    # fetch
+    try:
+        text, source = robust_fetch_text(CURRENTWEATHER_URL, cache_txt=cache_txt, timeout=60, tries=6)
+        print("source:", source)
+        with open(cache_txt, "w", encoding="utf-8") as f:
+            f.write(text)
+    except Exception as e:
+        print(f"❌ Failed to fetch feed: {e}")
+        return
+
+    df = load_and_clean_feed(text)
+    print(f"📥 Raw(cleaned) rows: {len(df)}")
+    print_latest_rows(df, n=8, title="(Cleaned feed preview)")
+
+    athens_now = datetime.now(ATHENS_TZ)
+    time_threshold = athens_now - timedelta(minutes=TIME_WINDOW_MIN)
+    print("athens_now:", athens_now)
+    print("max file datetime:", df["Datetime"].max())
+    print("min file datetime:", df["Datetime"].min())
+    print("time_threshold:", time_threshold)
+
+    before = len(df)
+    df = df[df["Datetime"] >= time_threshold].copy()
+    print(f"⏱️ time filter (last {TIME_WINDOW_MIN} min): {before} -> {len(df)} (removed {before - len(df)})")
+
+    # bbox filter
+    before = len(df)
+    df = df[
+        df["Longitude"].between(LON_MIN, LON_MAX) &
+        df["Latitude"].between(LAT_MIN, LAT_MAX)
+    ].copy()
+    print(f"🗺️ bbox Cyprus lon[{LON_MIN},{LON_MAX}] lat[{LAT_MIN},{LAT_MAX}]: {before} -> {len(df)} (removed {before - len(df)})")
+
+    if df.empty:
+        print("⚠️ No data points after filters. Exiting.")
+        return
+    data_until = df["Datetime"].max()
+    data_until_str = fmt_data_until(data_until)
+
+    # Optional MTG-LI lightning for Cyprus map.
+    # Rectangular bbox only: sea and just-outside-border flashes remain visible.
+    li_df = fetch_mtg_li_flashes_bbox(
+        athens_now,
+        LON_MIN, LON_MAX,
+        LAT_MIN, LAT_MAX
+    )
+
+    # stations in UTM
+    to_utm = Transformer.from_crs(CRS_WGS84, CRS_UTM, always_xy=True)
+    
+    rain_df = prepare_rainintensity_data(df)
+    if rain_df.empty:
+        print("⚠️ No rain-intensity stations left after exclusions.")
+        return
+    lons = rain_df["Longitude"].values.astype(float)
+    lats = rain_df["Latitude"].values.astype(float)
+    easts, norths = to_utm.transform(lons, lats)
+    intens = rain_df["RainIntensity"].values.astype(float)
+    
+    temp_lons = df["Longitude"].values.astype(float)
+    temp_lats = df["Latitude"].values.astype(float)
+    temp_easts, temp_norths = to_utm.transform(temp_lons, temp_lats)
+    tnow = df["TNow"].values.astype(float)
+
+    # grid over bbox corners
+    corn_lon = np.array([LON_MIN, LON_MAX, LON_MIN, LON_MAX])
+    corn_lat = np.array([LAT_MIN, LAT_MIN, LAT_MAX, LAT_MAX])
+    corn_E, corn_N = to_utm.transform(corn_lon, corn_lat)
+    E_MIN, E_MAX = float(np.min(corn_E)), float(np.max(corn_E))
+    N_MIN, N_MAX = float(np.min(corn_N)), float(np.max(corn_N))
+
+    grid_E, grid_N = np.meshgrid(
+        np.linspace(E_MIN, E_MAX, GRID_N),
+        np.linspace(N_MIN, N_MAX, GRID_N)
+    )
+
+    # interpolate intensity
+    grid_intensity = idw_any_neighbor(
+        easts, norths, intens,
+        grid_E, grid_N,
+        power=IDW_POWER,
+        max_distance=MAX_DISTANCE_M,
+        k=IDW_K
+    )
+
+    # mask inside boundary + within distance
+    grid_points_utm = gpd.GeoDataFrame(
+        geometry=gpd.points_from_xy(grid_E.ravel(), grid_N.ravel()),
+        crs=CRS_UTM
+    )
+    geo_mask = grid_points_utm.geometry.within(cyprus_boundary_utm).values.reshape(grid_E.shape)
+
+    st_tree = cKDTree(np.c_[easts, norths])
+    dists, _ = st_tree.query(np.c_[grid_E.ravel(), grid_N.ravel()])
+    distance_mask = dists.reshape(grid_E.shape) <= DISTANCE_MASK_M
+    final_mask = geo_mask & distance_mask
+
+    masked_intensity = np.full(grid_E.shape, np.nan, dtype=float)
+    masked_intensity[final_mask] = grid_intensity[final_mask]
+
+    # altitude + lapse (Cyprus uses global lapse only, per your script)
+    station_alt = sample_altitude_raster_m(CYPRUS_ALT_TIF_PATH, temp_lons, temp_lats, input_crs=CRS_WGS84)
+    lapse = fit_global_lapse_rate(tnow, station_alt)
+
+    ok_t = np.isfinite(tnow) & np.isfinite(station_alt)
+    t0 = np.full_like(tnow, np.nan, dtype=float)
+    t0[ok_t] = tnow[ok_t] - lapse * station_alt[ok_t]
+
+    grid_t0 = idw_any_neighbor(
+        temp_easts, temp_norths, t0,
+        grid_E, grid_N,
+        power=IDW_POWER,
+        max_distance=MAX_DISTANCE_M,
+        k=IDW_K
+    )
+    grid_alt = sample_altitude_raster_m(
+        CYPRUS_ALT_TIF_PATH,
+        grid_E.ravel(), grid_N.ravel(),
+        input_crs=CRS_UTM
+    ).reshape(grid_E.shape)
+
+    grid_tnow_adj = np.full(grid_E.shape, np.nan, dtype=float)
+    ok_grid = np.isfinite(grid_t0) & np.isfinite(grid_alt)
+    grid_tnow_adj[ok_grid] = grid_t0[ok_grid] + lapse * grid_alt[ok_grid]
+
+    snow_mask = (
+        final_mask &
+        np.isfinite(masked_intensity) &
+        np.isfinite(grid_tnow_adj) &
+        (masked_intensity > RAIN_THRESH) &
+        (grid_tnow_adj <= SNOW_T_C)
+    )
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        iso_alt_m = (SNOW_T_C - grid_t0) / lapse
+    iso_alt_m = np.where(final_mask & np.isfinite(iso_alt_m), iso_alt_m, np.nan)
+    iso_alt_m = np.clip(iso_alt_m, ISO_ALT_MIN_M, ISO_ALT_MAX_M)
+
+    # output names
+    ts = athens_now.strftime("%Y-%m-%d-%H-%M")
+    prefix = "cyprusrainintensity"
+    latest_name = "cyprusrainintensity_latest.png"
+    out_png = os.path.join(output_dir, f"{prefix}{ts}.png")
+    out_latest = os.path.join(output_dir, latest_name)
+
+    # plot
+    fig, ax = plt.subplots(figsize=(10, 10), dpi=300)
+
+    # degree-like tick labels while plotting in meters
+    from matplotlib.ticker import FixedLocator
+    lon0 = (LON_MIN + LON_MAX) / 2.0
+    lat0 = (LAT_MIN + LAT_MAX) / 2.0
+    lon_step = 0.5
+    lat_step = 0.5
+
+    lon_ticks = np.arange(np.floor(LON_MIN / lon_step) * lon_step, LON_MAX + 1e-9, lon_step)
+    lat_ticks = np.arange(np.floor(LAT_MIN / lat_step) * lat_step, LAT_MAX + 1e-9, lat_step)
+
+    x_ticks_m, _ = to_utm.transform(lon_ticks, np.full_like(lon_ticks, lat0))
+    _, y_ticks_m = to_utm.transform(np.full_like(lat_ticks, lon0), lat_ticks)
+
+    ax.xaxis.set_major_locator(FixedLocator(x_ticks_m))
+    ax.yaxis.set_major_locator(FixedLocator(y_ticks_m))
+    ax.set_xticklabels([f"{lon:.2f}°E" for lon in lon_ticks])
+    ax.set_yticklabels([f"{lat:.2f}°N" for lat in lat_ticks])
+    ax.set_xlabel("Longitude", fontsize=11)
+    ax.set_ylabel("Latitude", fontsize=11)
+    ax.grid(True, linewidth=0.3, alpha=0.5)
+
+    arr = ma.masked_invalid(masked_intensity)
+    img = ax.imshow(
+        arr,
+        extent=(E_MIN, E_MAX, N_MIN, N_MAX),
+        origin="lower",
+        cmap=CMAP_CYPRUS,
+        norm=NORM_CYPRUS,
+        alpha=0.7
+    )
+
+    plot_boundary_proj(ax, cyprus_boundary_utm, linewidth=0.5, color="black")
+    ax.set_aspect("equal")
+
+    contour_levels = [0.2, 2, 6, 40]
+    ax.contour(grid_E, grid_N, masked_intensity, levels=contour_levels, colors="black", linewidths=1)
+
+    # snowflakes
+    sx, sy = downsample_mask_points(
+        grid_E, grid_N, snow_mask,
+        max_points=MAX_SNOWFLAKES,
+        min_sep=MIN_SEP_M,
+        seed=SNOW_SEED
+    )
+    for x, y in zip(sx, sy):
+        ax.text(
+            x, y, "❄",
+            ha="center", va="center",
+            fontsize=SNOW_FONTSIZE,
+            color="black",
+            zorder=5,
+            path_effects=[pe.withStroke(linewidth=SNOW_STROKE_W, foreground="white")]
+        )
+
+    if len(sx) > 0:
+        print(f"❄ Snow flags placed at {len(sx)} point(s).")
+    else:
+        print("❄ No snow grid points found with current thresholds.")
+
+    # snowline altitude labels
+    if len(sx) > 0:
+        x_axis = grid_E[0, :]
+        y_axis = grid_N[:, 0]
+
+        label_pts = []
+        label_tree = None
+
+        for k, (x, y) in enumerate(zip(sx, sy)):
+            if LABEL_EVERY_N > 1 and (k % LABEL_EVERY_N) != 0:
+                continue
+
+            if LABEL_MIN_SEP_M and label_tree is not None and len(label_pts) > 0:
+                d, _ = label_tree.query([x, y], k=1)
+                if d < LABEL_MIN_SEP_M:
+                    continue
+
+            j = int(np.argmin(np.abs(x_axis - x)))
+            i = int(np.argmin(np.abs(y_axis - y)))
+
+            z = iso_alt_m[i, j]
+            if not np.isfinite(z):
+                continue
+
+            z_round = int(round(z / ISO_ALT_ROUND_M) * ISO_ALT_ROUND_M)
+            z_round = max(ISO_ALT_MIN_M, min(ISO_ALT_MAX_M, z_round))
+
+            ax.text(
+                x, y - LABEL_Y_OFFSET_M,
+                f"{z_round}m+",
+                ha="center", va="top",
+                fontsize=LABEL_FONTSIZE,
+                color="black",
+                zorder=6,
+                path_effects=[pe.withStroke(linewidth=LABEL_STROKE_W, foreground="white")]
+            )
+
+            label_pts.append([x, y])
+            if len(label_pts) == 1 or (len(label_pts) % 50 == 0):
+                label_tree = cKDTree(np.array(label_pts))
+
+    # MTG-LI lightning overlay. No land-border mask is applied to lightning.
+    plot_li_overlay_projected(
+        ax, li_df, to_utm,
+        LON_MIN, LON_MAX,
+        LAT_MIN, LAT_MAX
+    )
+
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="3%", pad=0.1)
+    cbar = plt.colorbar(img, cax=cax)
+    cbar.set_label("Ραγδαιότητα υετού (mm/h)", fontsize=12)
+
+    ax.set_title("Υπολογ. τελευταία διαθέσιμη ραγδαιότητα υετού", fontsize=14, pad=10, loc="center")
+    ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
+
+    timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M") + f" {athens_abbrev(athens_now)}"
+    left_text = (
+        f"Δημιουργήθηκε για το {BRAND_NAME}\n"
+        f"{timestamp_text}\n"
+        f"με δεδομένα έως και {data_until_str}\n"
+        f"{EUMETSAT_ATTRIBUTION}"
+    )
+    
+    ax.text(
+        0.01, 0.01, left_text,
+        transform=ax.transAxes,
+        fontsize=10,
+        color="black",
+        ha="left", va="bottom",
+        bbox=transparent_bbox(pad=0.3, rounded=True)
+    )
+
+    lapse_text = (
+        f"Lapse: {lapse*1000:.2f} °C/km | "
+        f"Snow labels: T≤{SNOW_T_C:.1f}°C | "
+        f"{li_footer_line(li_df)}"
+    )
+    ax.text(
+        0.99, 0.01, lapse_text,
+        transform=ax.transAxes,
+        fontsize=10,
+        color="black",
+        ha="right", va="bottom",
+        bbox=transparent_bbox(pad=0.3, rounded=True)
+    )
+
+
+    plt.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.92)
+
+    plt.savefig(out_png, dpi=300, bbox_inches="tight", pad_inches=0)
+    shutil.copy(out_png, out_latest)
+    plt.close(fig)
+
+    print("✅ Saved:", out_png)
+    print("✅ Saved:", out_latest)
+
+    # FTP (optional). Cyprus prune pattern differs, so keep it separate:
+    try:
+        ftp_upload_file(out_png)
+        ftp_upload_file(out_latest)
+        # prune cyprus timestamped
+        ftp_prune_timestamped(prefix=prefix, latest_name=latest_name, keep=144)
+    except Exception as e:
+        print(f"⚠️ FTP upload/prune failed: {e}")
+
+
+# =============================================================================
+# REGION CONFIGS
+# =============================================================================
+EGSA_REGIONS = {
+    "attica": {
+        "name": "Attica",
+        "bbox": (22.7, 25.0, 37.5, 38.7),
+        "prefix": "rain_intensity_attica_",
+        "latest_name": "latestattica.png",
+        "remote_keep": 216,
+        "time_window_min": 45,
+        "grid_n": 300,
+        "idw": {
+            "power": 2,
+            "k": 8,
+            "max_distance_m": 120_000,
+            "distance_mask_m": 170_000,
+        },
+        "snow": {
+            "min_sep_m": 4_500,
+            "max_snowflakes": 5000,
+            "fontsize": 6,
+            "stroke_w": 1.2,
+            "seed": 123,
+        },
+        "labels": {
+            "every_n": 10,
+            "min_sep_m": 12_000,
+            "y_offset_m": 3_000,
+            "fontsize": 6,
+        },
+        "footer_version": "v4.2-egsa2100",
+    },
+    "crete": {
+        "name": "Crete",
+        "bbox": (23.37, 26.4, 34.7, 35.78),
+        "prefix": "rain_intensity_crete_",
+        "latest_name": "latestcrete.png",
+        "remote_keep": 216,
+        "time_window_min": 45,
+        "grid_n": 300,
+        "idw": {
+            "power": 2,
+            "k": 8,
+            "max_distance_m": 120_000,
+            "distance_mask_m": 170_000,
+        },
+        "snow": {
+            "min_sep_m": 4_500,
+            "max_snowflakes": 5000,
+            "fontsize": 6,
+            "stroke_w": 1.2,
+            "seed": 123,
+        },
+        "labels": {
+            "every_n": 10,
+            "min_sep_m": 12_000,
+            "y_offset_m": 3_000,
+            "fontsize": 6,
+        },
+        "footer_version": "v4.2-egsa2100",
+    },
+    "negreece": {
+        "name": "NE Greece",
+        "bbox": (22.0, 26.6, 39.7, 41.8),
+        "prefix": "rain_intensity_negreece_",
+        "latest_name": "latestnegreece.png",
+        "remote_keep": 216,
+        "time_window_min": 45,
+        "grid_n": 300,
+        "idw": {
+            "power": 2,
+            "k": 8,
+            "max_distance_m": 120_000,
+            "distance_mask_m": 170_000,
+        },
+        "snow": {
+            "min_sep_m": 4_500,
+            "max_snowflakes": 5000,
+            "fontsize": 6,
+            "stroke_w": 1.2,
+            "seed": 123,
+        },
+        "labels": {
+            "every_n": 10,
+            "min_sep_m": 12_000,
+            "y_offset_m": 3_000,
+            "fontsize": 6,
+        },
+        "footer_version": "v4.2-egsa2100",
+    },
+
+    "swgreece": {
+        "name": "SW Greece",
+        "bbox": (20.0, 24.0, 36.0, 39.0),
+        "prefix": "rain_intensity_swgreece_",
+        "latest_name": "latestswgreece.png",
+        "remote_keep": 216,
+        "time_window_min": 45,
+        "grid_n": 300,
+        "idw": {
+            "power": 2,
+            "k": 8,
+            "max_distance_m": 120_000,
+            "distance_mask_m": 170_000,
+        },
+        "snow": {
+            "min_sep_m": 4_500,
+            "max_snowflakes": 5000,
+            "fontsize": 6,
+            "stroke_w": 1.2,
+            "seed": 123,
+        },
+        "labels": {
+            "every_n": 10,
+            "min_sep_m": 12_000,
+            "y_offset_m": 3_000,
+            "fontsize": 6,
+        },
+        "footer_version": "v4.2-egsa2100",
+    },
+
+    "nwgreece": {
+        "name": "NW Greece",
+        "bbox": (19.36, 23.8, 38.53, 41.2),
+        "prefix": "rain_intensity_nwgreece_",
+        "latest_name": "latestnwgreece.png",
+        "remote_keep": 216,
+        "time_window_min": 45,
+        "grid_n": 300,
+        "idw": {
+            "power": 2,
+            "k": 8,
+            "max_distance_m": 120_000,
+            "distance_mask_m": 170_000,
+        },
+        "snow": {
+            "min_sep_m": 4_500,
+            "max_snowflakes": 5000,
+            "fontsize": 6,
+            "stroke_w": 1.2,
+            "seed": 123,
+        },
+        "labels": {
+            "every_n": 10,
+            "min_sep_m": 12_000,
+            "y_offset_m": 3_000,
+            "fontsize": 6,
+        },
+        "footer_version": "v4.2-egsa2100",
+    },
+}
+
+
+# =============================================================================
+# MAIN CLI
 # =============================================================================
 def main():
-    run_greece()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--region",
+        default="all",
+        choices=["all", "greece", "attica", "cyprus"],
+        help="Which region to run. This version supports Greece, Attica and Cyprus only."
+    )
+    args = parser.parse_args()
+
+    if args.region in ("all", "greece"):
+        run_greece()
+
+    if args.region in ("all", "attica"):
+        run_egsa_region(EGSA_REGIONS["attica"])
+
+    if args.region in ("all", "cyprus"):
+        run_cyprus()
 
 
 if __name__ == "__main__":
