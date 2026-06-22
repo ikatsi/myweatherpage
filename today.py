@@ -1770,6 +1770,10 @@ def main():
     ).reshape(grid_x.shape)
     cell_area_km2 = build_latitude_weighted_cell_area_km2(grid_y)
 
+    # Regional static grids, calculated once and reused by regional maps.
+    regional_contexts = prepare_region_contexts(greece)
+    attica_ctx = regional_contexts["attica"]
+
     # -------- Rain --------
     rain_input = prepare_rain_data(today_data, athens_now.date())
     rain_dir = os.path.join(BASE_DIR, "TodayRainMaps")
@@ -1793,6 +1797,16 @@ def main():
         sort_ascending=True
     )
 
+    tmin_attica, _ = make_temp_region_egsa(
+        temp_input,
+        attica_ctx,
+        tmin_dir,
+        athens_now,
+        DEM_PATH,
+        var_col="TMin",
+        stable_name="tmin_attica.png",
+        title=attica_ctx["region"]["title_tmin"]
+    )
 
     # -------- Tmax --------
     tmax_input = temp_input
@@ -1809,13 +1823,25 @@ def main():
         extra_without_topbox_name="tmax.png"
     )
 
+    tmax_attica, _ = make_temp_region_egsa(
+        tmax_input,
+        attica_ctx,
+        tmax_dir,
+        athens_now,
+        DEM_PATH,
+        var_col="TMax",
+        stable_name="tmax_attica.png",
+        title=attica_ctx["region"]["title_tmax"]
+    )
 
     # -------- Upload stable filenames only --------
     uploads = [
         (rain_main, "todayrain.png"),
         (tmin_main, "tmin.png"),
+        (tmin_attica, "tmin_attica.png"),
         (tmax_main, "tmax.png"),
         (tmax_with_top15, "tmax_with_top15.png"),
+        (tmax_attica, "tmax_attica.png"),
     ]
 
     try:
