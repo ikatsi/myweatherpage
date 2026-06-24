@@ -132,8 +132,8 @@ NE_LAT_MIN, NE_LAT_MAX = 39.7, 41.8
 NE_N = 300
 
 # --- NW Greece bbox (EGSA approach like Attica/Crete/NE/SW Greece) ---
-NW_LON_MIN, NW_LON_MAX = 19.36, 23.8
-NW_LAT_MIN, NW_LAT_MAX = 38.53, 41.2
+NW_LON_MIN, NW_LON_MAX = 19.36, 21.94
+NW_LAT_MIN, NW_LAT_MAX = 38.53, 40.94
 NW_N = 300
 
 # --- SW Greece bbox (EGSA approach like Attica/Crete/NE/NW Greece) ---
