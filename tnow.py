@@ -677,10 +677,10 @@ def add_top5_box_cyprus(ax, tt0: pd.DataFrame) -> None:
     )
 
     ax.text(
-        0.99, 0.99, box_text,
+        0.99, 0.01, box_text,
         transform=ax.transAxes,
         ha="right",
-        va="top",
+        va="bottom",
         fontsize=8.2,
         color="black",
         bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.25"),
