@@ -2301,6 +2301,24 @@ def make_tnow_cyprus_utm(df, athens_now):
 
     ax.set_title("Τρέχουσα θερμοκρασία Κύπρου (προσαρμογή υψομέτρου)", fontsize=16, pad=10)
 
+    occupied_disclaimer = (
+        "Δεδομένα από τα κατεχόμενα τμήματα της Κύπρου χρησιμοποιούνται\n"
+        "μόνο για μετεωρολογικούς σκοπούς, χωρίς αναγνώριση καθεστώτος,\n"
+        "σύμφωνα με τα Ψηφίσματα 541 και 550 του ΣΑ/ΟΗΕ."
+    )
+
+    ax.text(
+        0.01, 0.99, occupied_disclaimer,
+        transform=ax.transAxes,
+        fontsize=5.8,
+        color="black",
+        ha="left",
+        va="top",
+        bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.2"),
+        path_effects=[pe.withStroke(linewidth=1.8, foreground="white")],
+        zorder=30
+    )
+
     add_top5_box_cyprus(ax, tt0)
 
     ax.text(
