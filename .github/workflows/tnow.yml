@@ -59,6 +59,26 @@ jobs:
             -out greece.geojson \
             -pass pass:"${GEOJSON_PASS}"
 
+      - name: Decrypt cyprus.geojson if needed
+        if: ${{ hashFiles('cyprus.geojson') == '' }}
+        run: |
+          test -f cyprus.geojson.enc || { echo "cyprus.geojson.enc missing"; exit 1; }
+          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in cyprus.geojson.enc \
+            -out cyprus.geojson \
+            -pass pass:"${GEOJSON_PASS}"
+
+      - name: Decrypt Cyprus altitude raster if needed
+        if: ${{ hashFiles('cyprus_dsm_90m.tif') == '' }}
+        run: |
+          test -f cyprus.tif.enc || { echo "cyprus.tif.enc missing"; exit 1; }
+          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in cyprus.tif.enc \
+            -out cyprus_dsm_90m.tif \
+            -pass pass:"${GEOJSON_PASS}"
+
       - name: Run tnow.py
         run: |
           python tnow.py
