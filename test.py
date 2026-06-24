@@ -2516,6 +2516,24 @@ def run_cyprus():
     ax.set_title("Υπολογ. τελευταία διαθέσιμη ραγδαιότητα υετού", fontsize=14, pad=10, loc="center")
     ax.tick_params(axis="both", which="major", labelsize=10, pad=2)
 
+    occupied_disclaimer = (
+        "Δεδομένα από τα κατεχόμενα τμήματα της Κύπρου χρησιμοποιούνται\n"
+        "μόνο για μετεωρολογικούς σκοπούς, χωρίς αναγνώριση καθεστώτος,\n"
+        "σύμφωνα με τα Ψηφίσματα 541 και 550 του ΣΑ/ΟΗΕ."
+    )
+
+    ax.text(
+        0.01, 0.99, occupied_disclaimer,
+        transform=ax.transAxes,
+        fontsize=5.8,
+        color="black",
+        ha="left",
+        va="top",
+        bbox=transparent_bbox(pad=0.2, rounded=True),
+        path_effects=[pe.withStroke(linewidth=1.8, foreground="white")],
+        zorder=30
+    )
+
     timestamp_text = athens_now.strftime("%Y-%m-%d %H:%M") + f" {athens_abbrev(athens_now)}"
     left_text = (
         f"Δημιουργήθηκε για το {BRAND_NAME}\n"
