@@ -2520,14 +2520,14 @@ def run_cyprus():
     left_text = (
         f"Δημιουργήθηκε για το {BRAND_NAME}\n"
         f"{timestamp_text}\n"
-        f"με δεδομένα έως και {data_until_str}\n"
+        f"τελ. δεδομένα από {data_until_str}\n"
         f"{EUMETSAT_ATTRIBUTION}"
     )
     
     ax.text(
         0.01, 0.01, left_text,
         transform=ax.transAxes,
-        fontsize=10,
+        fontsize=8,
         color="black",
         ha="left", va="bottom",
         bbox=transparent_bbox(pad=0.3, rounded=True)
