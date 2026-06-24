@@ -141,6 +141,14 @@ SW_LON_MIN, SW_LON_MAX = 20.0, 24.0
 SW_LAT_MIN, SW_LAT_MAX = 36.0, 39.0
 SW_N = 300
 
+# --- Cyprus bbox (UTM 36N approach, same as rainintensityall.py) ---
+CY_LON_MIN, CY_LON_MAX = 32.0, 34.9
+CY_LAT_MIN, CY_LAT_MAX = 34.4, 35.9
+CY_N = 300
+
+CYPRUS_GEOJSON_PATH = os.path.join(BASE_DIR, "cyprus.geojson")
+CYPRUS_ALT_TIF_PATH = os.path.join(BASE_DIR, "cyprus_dsm_90m.tif")
+
 # Fetch/retry
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -207,11 +215,16 @@ TOPBOX_NAME_MAX = 26
 TEMP_VMIN = -25.0
 TEMP_VMAX = 45.0
 
-# Attica EGSA settings (meters)
+# Attica / Greece regional projection settings
 CRS_WGS84 = "EPSG:4326"
 CRS_EGSA87 = "EPSG:2100"
+CRS_UTM36N = "EPSG:32636"
+
 WGS_TO_EGSA = Transformer.from_crs(CRS_WGS84, CRS_EGSA87, always_xy=True)
 EGSA_TO_WGS = Transformer.from_crs(CRS_EGSA87, CRS_WGS84, always_xy=True)
+
+WGS_TO_UTM36N = Transformer.from_crs(CRS_WGS84, CRS_UTM36N, always_xy=True)
+UTM36N_TO_WGS = Transformer.from_crs(CRS_UTM36N, CRS_WGS84, always_xy=True)
 
 # IDW / masks in meters for Attica
 AT_IDW_K = 8
@@ -219,6 +232,13 @@ AT_IDW_POWER = 2
 AT_MAX_DISTANCE_M = 120_000
 AT_MIN_NEIGHBORS = 3
 AT_DISTANCE_MASK_M = 170_000
+
+# IDW / masks in meters for Cyprus
+CY_IDW_K = 8
+CY_IDW_POWER = 2
+CY_MAX_DISTANCE_M = 40_000
+CY_MIN_NEIGHBORS = 3
+CY_DISTANCE_MASK_M = 40_000
 
 # Lapse-rate estimation in Attica (meters)
 LAPSE_DEFAULT = -0.0065
@@ -463,6 +483,38 @@ def sample_dem_lonlat(dem_path: str, lons, lats) -> np.ndarray:
 
     return elev
 
+def sample_raster_xy(raster_path: str, xs, ys, input_crs: str) -> np.ndarray:
+    """
+    Sample a raster using coordinates in input_crs.
+    Reprojects sample coordinates to the raster CRS if needed.
+    """
+    if not os.path.exists(raster_path):
+        raise FileNotFoundError(f"Raster not found at: {raster_path}")
+
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+
+    with rasterio.open(raster_path) as src:
+        if src.crs is None:
+            raise RuntimeError("Raster has no CRS defined.")
+
+        if str(src.crs) != str(input_crs):
+            from rasterio.warp import transform as rio_transform
+            xs2, ys2 = rio_transform(str(input_crs), src.crs, xs.tolist(), ys.tolist())
+        else:
+            xs2, ys2 = xs.tolist(), ys.tolist()
+
+        samples = list(src.sample(zip(xs2, ys2)))
+        arr = np.array(samples, dtype=float).reshape(-1)
+
+        nodata = src.nodata
+        if nodata is not None:
+            arr = np.where(arr == nodata, np.nan, arr)
+
+        arr = np.where(arr < -100, np.nan, arr)
+        arr = np.where(np.isfinite(arr), arr, 0.0)
+
+    return arr
 
 # =========================
 # MASKS / CONTOURS / STAMP
@@ -714,6 +766,48 @@ def add_contours_attica(ax, X, Y, field):
                 ])
         except Exception:
             pass
+
+def bounds_reasonable_cyprus(geom, lon_min=31.0, lon_max=36.0, lat_min=34.0, lat_max=36.5):
+    try:
+        minx, miny, maxx, maxy = geom.bounds
+        return (
+            (lon_min <= minx <= lon_max) and
+            (lon_min <= maxx <= lon_max) and
+            (lat_min <= miny <= lat_max) and
+            (lat_min <= maxy <= lat_max)
+        )
+    except Exception:
+        return False
+
+
+def swap_geom_xy(geom):
+    from shapely.geometry import Polygon, MultiPolygon
+
+    if isinstance(geom, Polygon):
+        x, y = geom.exterior.xy
+        return Polygon(np.column_stack([y, x]))
+
+    if isinstance(geom, MultiPolygon):
+        return MultiPolygon([swap_geom_xy(g) for g in geom.geoms])
+
+    return geom
+
+
+def fit_lapse_rate_simple(st_temp, st_elev):
+    st_temp = np.asarray(st_temp, dtype=float)
+    st_elev = np.asarray(st_elev, dtype=float)
+
+    ok = np.isfinite(st_temp) & np.isfinite(st_elev)
+
+    if np.sum(ok) < 8:
+        return LAPSE_DEFAULT
+
+    try:
+        b, _a = np.polyfit(st_elev[ok], st_temp[ok], 1)
+        b = float(np.clip(b, LAPSE_MIN, LAPSE_MAX))
+        return b
+    except Exception:
+        return LAPSE_DEFAULT
 
 def _temp_colorbar(ax, img):
     ticks = [-25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30, 35, 40, 45]
@@ -1957,6 +2051,208 @@ def make_tnow_swgreece_egsa(df, greece_gdf_wgs, dem_path, athens_now):
 
     return main_path, ts_path
 
+def make_tnow_cyprus_utm(df, athens_now):
+    if "TNow" not in df.columns:
+        print("❌ TNow missing.")
+        return (None, None)
+
+    if not os.path.exists(CYPRUS_GEOJSON_PATH):
+        print(f"❌ Missing Cyprus GeoJSON: {CYPRUS_GEOJSON_PATH}")
+        return (None, None)
+
+    if not os.path.exists(CYPRUS_ALT_TIF_PATH):
+        print(f"❌ Missing Cyprus altitude raster: {CYPRUS_ALT_TIF_PATH}")
+        return (None, None)
+
+    tt0 = df.copy()
+    tt0["TNow"] = pd.to_numeric(tt0["TNow"], errors="coerce")
+    tt0.dropna(subset=["TNow", "Latitude", "Longitude"], inplace=True)
+    tt0 = tt0[~np.isclose(tt0["TNow"].to_numpy(dtype=float), SENTINEL_TEMP, atol=1e-6)]
+
+    tt0 = tt0[
+        tt0["Longitude"].between(CY_LON_MIN, CY_LON_MAX) &
+        tt0["Latitude"].between(CY_LAT_MIN, CY_LAT_MAX)
+    ].copy()
+
+    if tt0.empty:
+        print("❌ No valid TNow data for Cyprus.")
+        return (None, None)
+
+    st_lon = tt0["Longitude"].to_numpy(dtype=float)
+    st_lat = tt0["Latitude"].to_numpy(dtype=float)
+    st_t = tt0["TNow"].to_numpy(dtype=float)
+
+    st_x, st_y = WGS_TO_UTM36N.transform(st_lon.tolist(), st_lat.tolist())
+    st_x = np.asarray(st_x, dtype=float)
+    st_y = np.asarray(st_y, dtype=float)
+
+    st_elev = sample_raster_xy(
+        CYPRUS_ALT_TIF_PATH,
+        st_lon,
+        st_lat,
+        input_crs=CRS_WGS84
+    )
+
+    ok = np.isfinite(st_t) & np.isfinite(st_x) & np.isfinite(st_y) & np.isfinite(st_elev)
+    st_t = st_t[ok]
+    st_x = st_x[ok]
+    st_y = st_y[ok]
+    st_elev = st_elev[ok]
+
+    if len(st_t) < 5:
+        print("❌ Too few valid stations for Cyprus interpolation.")
+        return (None, None)
+
+    lapse = fit_lapse_rate_simple(st_t, st_elev)
+    st_t0 = st_t - (lapse * st_elev)
+
+    corners_lon = [CY_LON_MIN, CY_LON_MAX, CY_LON_MIN, CY_LON_MAX]
+    corners_lat = [CY_LAT_MIN, CY_LAT_MIN, CY_LAT_MAX, CY_LAT_MAX]
+    cx, cy = WGS_TO_UTM36N.transform(corners_lon, corners_lat)
+
+    x_min, x_max = float(np.min(cx)), float(np.max(cx))
+    y_min, y_max = float(np.min(cy)), float(np.max(cy))
+
+    grid_x_m, grid_y_m = np.meshgrid(
+        np.linspace(x_min, x_max, CY_N),
+        np.linspace(y_min, y_max, CY_N)
+    )
+
+    t0_grid = idw_fast(
+        st_x, st_y, st_t0,
+        grid_x_m, grid_y_m,
+        k=CY_IDW_K,
+        power=CY_IDW_POWER,
+        max_distance=CY_MAX_DISTANCE_M,
+        min_neighbors=CY_MIN_NEIGHBORS
+    )
+
+    grid_elev = sample_raster_xy(
+        CYPRUS_ALT_TIF_PATH,
+        grid_x_m.ravel(),
+        grid_y_m.ravel(),
+        input_crs=CRS_UTM36N
+    ).reshape(grid_x_m.shape)
+
+    t_grid = t0_grid + (lapse * grid_elev)
+
+    cyprus = gpd.read_file(CYPRUS_GEOJSON_PATH)
+
+    if cyprus.crs is None:
+        cyprus = cyprus.set_crs(CRS_WGS84)
+
+    cyprus = cyprus[~cyprus.geometry.is_empty].copy()
+
+    if not cyprus.geometry.is_valid.all():
+        cyprus.geometry = cyprus.buffer(0)
+
+    if cyprus.crs.to_string() != CRS_WGS84:
+        cyprus_ll = cyprus.to_crs(CRS_WGS84)
+    else:
+        cyprus_ll = cyprus.copy()
+
+    if hasattr(cyprus_ll.geometry, "union_all"):
+        cyprus_boundary_ll = cyprus_ll.geometry.union_all()
+    else:
+        cyprus_boundary_ll = cyprus_ll.geometry.unary_union
+
+    if not bounds_reasonable_cyprus(cyprus_boundary_ll):
+        cyprus_ll.geometry = cyprus_ll.geometry.apply(swap_geom_xy)
+
+    cyprus_utm = cyprus_ll.to_crs(CRS_UTM36N)
+
+    if hasattr(cyprus_utm.geometry, "union_all"):
+        cyprus_boundary_utm = cyprus_utm.geometry.union_all()
+    else:
+        cyprus_boundary_utm = cyprus_utm.geometry.unary_union
+
+    grid_pts = gpd.GeoDataFrame(
+        geometry=gpd.points_from_xy(grid_x_m.ravel(), grid_y_m.ravel()),
+        crs=CRS_UTM36N
+    )
+
+    geo_mask = grid_pts.geometry.within(cyprus_boundary_utm).values.reshape(grid_x_m.shape)
+
+    tree = cKDTree(np.c_[st_x, st_y])
+    d, _ = tree.query(np.c_[grid_x_m.ravel(), grid_y_m.ravel()])
+    dist_mask = (d.reshape(grid_x_m.shape) <= CY_DISTANCE_MASK_M)
+
+    final_mask = geo_mask & dist_mask & np.isfinite(grid_elev)
+
+    out = np.full(grid_x_m.shape, np.nan, dtype=float)
+    out[final_mask] = t_grid[final_mask]
+
+    fig, ax = plt.subplots(figsize=(10, 10), dpi=300)
+
+    img = ax.imshow(
+        ma.masked_invalid(out),
+        extent=(x_min, x_max, y_min, y_max),
+        origin="lower",
+        cmap=TEMP_CMAP,
+        norm=TEMP_NORM,
+        alpha=0.95
+    )
+
+    cyprus_utm.boundary.plot(ax=ax, color="black", linewidth=0.6)
+
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_aspect("equal", adjustable="box")
+
+    y_ref_for_lon = y_min
+    x_ref_for_lat = x_min
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+
+    def fmt_lon(x, pos):
+        lon, _lat = UTM36N_TO_WGS.transform(x, y_ref_for_lon)
+        return fmt_decimal_comma(lon, 2)
+
+    def fmt_lat(y, pos):
+        _lon, lat = UTM36N_TO_WGS.transform(x_ref_for_lat, y)
+        return fmt_decimal_comma(lat, 2)
+
+    ax.xaxis.set_major_formatter(FuncFormatter(fmt_lon))
+    ax.yaxis.set_major_formatter(FuncFormatter(fmt_lat))
+
+    ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
+    ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
+
+    add_contours(ax, grid_x_m, grid_y_m, out)
+
+    cbar = fig.colorbar(
+        img,
+        ax=ax,
+        orientation="vertical",
+        extend="both",
+        fraction=0.035,
+        pad=0.02
+    )
+    cbar.set_ticks([-25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30, 35, 40, 45])
+    cbar.set_label("Θερμοκρασία (°C)", fontsize=12)
+
+    ax.set_title("Τρέχουσα θερμοκρασία Κύπρου (προσαρμογή υψομέτρου)", fontsize=16, pad=10)
+
+    ax.text(
+        0.01, 0.01, stamp_text(athens_now),
+        transform=ax.transAxes,
+        fontsize=9,
+        color="black",
+        ha="left",
+        va="bottom",
+        bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.3"),
+        path_effects=[pe.withStroke(linewidth=2.0, foreground="white")]
+    )
+
+    main_path, ts_path = save_with_timestamp(fig, OUT_DIR, "tnow_cyprus.png", athens_now)
+    plt.close(fig)
+
+    print("✅ Saved:", main_path)
+    if ts_path:
+        print("✅ Saved:", ts_path)
+
+    return main_path, ts_path
+
 def filter_fresh_rows(data: pd.DataFrame, athens_now: datetime, max_age_minutes: int = 60) -> pd.DataFrame:
     """
     Keep only rows with a valid Datetime and age <= max_age_minutes, using Athens timezone.
@@ -2016,7 +2312,16 @@ def main():
 
     data = data[(data["Latitude"].notna()) & (data["Longitude"].notna())]
     data = data[(data["Latitude"] != 0) & (data["Longitude"] != 0)]
-    data = data[data["Longitude"] <= 30]
+
+    # Keep both Greece and Cyprus rows.
+    # Greece regional/national functions filter by their own bboxes later.
+    # Cyprus needs longitudes around 32-35E, so do NOT globally cut at <=30.
+    data = data[
+        (data["Longitude"] >= 19.0) &
+        (data["Longitude"] <= 35.0) &
+        (data["Latitude"] >= 34.0) &
+        (data["Latitude"] <= 42.8)
+    ]
     
     # Exclude specific stations from all maps and top-10 lists
     if "webcode" in data.columns:
@@ -2052,11 +2357,14 @@ def main():
     nw_main, nw_ts = make_tnow_nwgreece_egsa(data, greece, DEM_PATH, athens_now)
     sw_main, sw_ts = make_tnow_swgreece_egsa(data, greece, DEM_PATH, athens_now)
 
-    # 3) Greece last
+    # 3) Cyprus
+    cy_main, cy_ts = make_tnow_cyprus_utm(data, athens_now)
+
+    # 4) Greece last
     gr_main, gr_ts = make_tnow_greece_wgs(data, greece, DEM_PATH, athens_now)
 
     # Upload ONLY the stable filenames, keep timestamped copies local only
-    for p in [att_main, crete_main, ne_main, nw_main, sw_main, gr_main]:
+    for p in [att_main, crete_main, ne_main, nw_main, sw_main, cy_main, gr_main]:
         if p and os.path.exists(p):
             try:
                 upload_to_ftp(p)
