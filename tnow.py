@@ -628,6 +628,66 @@ def add_top10_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
     ### draw_rank_markers(cold10, color="#1d4ed8")  # blue-ish ### δείχνει τα τοπ 10 ψυχρότερα πάνω στον χάρτη
     ### draw_rank_markers(hot10,  color="#dc2626")  # red-ish  ### δείχνει τα τοπ 10 θερμότερα πάνω στον χάρτη
 
+def add_top5_box_cyprus(ax, tt0: pd.DataFrame) -> None:
+    """
+    Transparent top-right Cyprus info box.
+    - Cold 5
+    - Hot 5
+    Uses citygr where available, like the Greece TNow box.
+    """
+    if tt0 is None or tt0.empty:
+        return
+    if "TNow" not in tt0.columns:
+        return
+
+    label_col = "citygr" if "citygr" in tt0.columns else pick_station_label_column(tt0)
+
+    tmp = tt0.copy()
+    tmp["TNow"] = pd.to_numeric(tmp["TNow"], errors="coerce")
+    tmp = tmp.dropna(subset=["TNow", "Latitude", "Longitude"])
+
+    if tmp.empty:
+        return
+
+    if label_col not in tmp.columns:
+        tmp[label_col] = "station"
+
+    cold5 = tmp.nsmallest(5, "TNow").copy()
+    hot5 = tmp.nlargest(5, "TNow").copy()
+
+    def fmt_block(dfx: pd.DataFrame, title: str) -> str:
+        lines = [title]
+        i = 1
+        for _, r in dfx.iterrows():
+            try:
+                t = float(r["TNow"])
+            except Exception:
+                continue
+
+            name = shorten_for_box(str(r.get(label_col, "–")), max_chars=TOPBOX_NAME_MAX)
+            lines.append(f"{i}. {name}: {fmt_decimal_comma(t, 1)}°C")
+            i += 1
+
+        return "\n".join(lines)
+
+    box_text = (
+        fmt_block(cold5, "Ψυχρότερες 5 περιοχές")
+        + "\n\n"
+        + fmt_block(hot5, "Θερμότερες 5 περιοχές")
+    )
+
+    ax.text(
+        0.99, 0.99, box_text,
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=8.2,
+        color="black",
+        bbox=dict(facecolor="none", edgecolor="none", boxstyle="round,pad=0.25"),
+        path_effects=[pe.withStroke(linewidth=2.5, foreground="white")],
+        zorder=30
+    )
+
 def add_contours(ax, X, Y, field):
     """
     Draw ordinary contours every 3°C without labels.
@@ -2240,6 +2300,8 @@ def make_tnow_cyprus_utm(df, athens_now):
     cbar.set_label("Θερμοκρασία (°C)", fontsize=12)
 
     ax.set_title("Τρέχουσα θερμοκρασία Κύπρου (προσαρμογή υψομέτρου)", fontsize=16, pad=10)
+
+    add_top5_box_cyprus(ax, tt0)
 
     ax.text(
         0.01, 0.01, stamp_text(athens_now),
