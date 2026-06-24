@@ -2534,14 +2534,14 @@ def run_cyprus():
     )
 
     lapse_text = (
-        f"Lapse: {lapse*1000:.2f} °C/km | "
-        f"Snow labels: T≤{SNOW_T_C:.1f}°C | "
+        f"Lapse: {lapse*1000:.2f} °C/km\n"
+        f"Snow labels: T≤{SNOW_T_C:.1f}°C\n"
         f"{li_footer_line(li_df)}"
     )
     ax.text(
         0.99, 0.01, lapse_text,
         transform=ax.transAxes,
-        fontsize=10,
+        fontsize=8,
         color="black",
         ha="right", va="bottom",
         bbox=transparent_bbox(pad=0.3, rounded=True)
