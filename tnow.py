@@ -633,6 +633,87 @@ def add_contours(ax, X, Y, field):
         except Exception:
             pass
 
+def add_contours_attica(ax, X, Y, field):
+    """
+    Attica-only contours:
+    - Draw contours every 3°C
+    - Label all 3°C contours
+    - Keep selected prominent contours thicker
+    """
+    levels = np.arange(-30, 46, 3, dtype=float)
+    special_levels = [0.0, 10.0, 20.0, 30.0, 37.0, 40.0]
+
+    thin_levels = [
+        lv for lv in levels
+        if not any(np.isclose(lv, special) for special in special_levels)
+    ]
+
+    cs_thin = None
+    cs_special = None
+
+    try:
+        cs_thin = ax.contour(
+            X, Y, field,
+            levels=thin_levels,
+            colors="black",
+            linewidths=0.6,
+            alpha=0.70
+        )
+    except Exception:
+        cs_thin = None
+
+    try:
+        cs_special = ax.contour(
+            X, Y, field,
+            levels=special_levels,
+            colors="black",
+            linewidths=1.3,
+            alpha=0.95
+        )
+    except Exception:
+        cs_special = None
+
+    # Label the ordinary 3°C contours too
+    if cs_thin is not None:
+        try:
+            texts_thin = ax.clabel(
+                cs_thin,
+                levels=cs_thin.levels[:],
+                inline=True,
+                inline_spacing=2,
+                fmt="%d",
+                fontsize=4.5
+            )
+
+            for t in texts_thin:
+                t.set_rotation(0)
+                t.set_rotation_mode("anchor")
+                t.set_path_effects([
+                    pe.withStroke(linewidth=1.6, foreground="white")
+                ])
+        except Exception:
+            pass
+
+    # Label the prominent contours slightly more clearly
+    if cs_special is not None:
+        try:
+            texts_special = ax.clabel(
+                cs_special,
+                levels=cs_special.levels[:],
+                inline=True,
+                inline_spacing=2,
+                fmt="%d",
+                fontsize=5
+            )
+
+            for t in texts_special:
+                t.set_rotation(0)
+                t.set_rotation_mode("anchor")
+                t.set_path_effects([
+                    pe.withStroke(linewidth=1.8, foreground="white")
+                ])
+        except Exception:
+            pass
 
 def _temp_colorbar(ax, img):
     ticks = [-25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30, 35, 40, 45]
@@ -1141,7 +1222,7 @@ def make_tnow_attica_egsa(df, greece_gdf_wgs, dem_path, athens_now):
     ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
 
-    add_contours(ax, grid_x_m, grid_y_m, out)
+    add_contours_attica(ax, grid_x_m, grid_y_m, out)
 
     # slimmer colorbar so the map stays large (Attica figure is square)
     cbar = fig.colorbar(img, ax=ax, orientation="vertical", extend="both",
