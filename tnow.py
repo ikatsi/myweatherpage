@@ -909,10 +909,18 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     tt0["TNow"] = pd.to_numeric(tt0["TNow"], errors="coerce")
     tt0.dropna(subset=["TNow", "Latitude", "Longitude"], inplace=True)
     tt0 = tt0[~np.isclose(tt0["TNow"].to_numpy(dtype=float), SENTINEL_TEMP, atol=1e-6)]
+
+    # Greece national map: use Greece-only stations for interpolation,
+    # top-10 boxes, observed extrema, and observed threshold/frost checks.
+    if "Country" in tt0.columns:
+        tt0 = tt0[
+            tt0["Country"].astype(str).str.strip().str.lower() == "greece"
+        ].copy()
+
     if tt0.empty:
         print("❌ No valid TNow data for Greece.")
         return (None, None)
-
+    
     grid_x, grid_y = np.meshgrid(
         np.linspace(GR_LON_MIN, GR_LON_MAX, GR_N),
         np.linspace(GR_LAT_MIN, GR_LAT_MAX, GR_N)
@@ -1488,8 +1496,8 @@ def make_tnow_crete_egsa(df, greece_gdf_wgs, dem_path, athens_now):
     ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
 
-    add_contours(ax, grid_x_m, grid_y_m, out)
-
+    add_contours_attica(ax, grid_x_m, grid_y_m, out)
+    
     # slimmer colorbar so the map stays large (Attica figure is square)
     cbar = fig.colorbar(img, ax=ax, orientation="vertical", extend="both",
                         fraction=0.035, pad=0.02)
@@ -1660,7 +1668,7 @@ def make_tnow_negreece_egsa(df, greece_gdf_wgs, dem_path, athens_now):
     ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
 
-    add_contours(ax, grid_x_m, grid_y_m, out)
+    add_contours_attica(ax, grid_x_m, grid_y_m, out)
 
     cbar = fig.colorbar(img, ax=ax, orientation="vertical", extend="both",
                         fraction=0.035, pad=0.02)
@@ -1845,7 +1853,7 @@ def make_tnow_nwgreece_egsa(df, greece_gdf_wgs, dem_path, athens_now):
     ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
 
-    add_contours(ax, grid_x_m, grid_y_m, out)
+    add_contours_attica(ax, grid_x_m, grid_y_m, out)
 
     cbar = fig.colorbar(
         img,
@@ -2025,7 +2033,7 @@ def make_tnow_swgreece_egsa(df, greece_gdf_wgs, dem_path, athens_now):
     ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
 
-    add_contours(ax, grid_x_m, grid_y_m, out)
+    add_contours_attica(ax, grid_x_m, grid_y_m, out)
 
     cbar = fig.colorbar(img, ax=ax, orientation="vertical", extend="both",
                         fraction=0.035, pad=0.02)
@@ -2218,7 +2226,7 @@ def make_tnow_cyprus_utm(df, athens_now):
     ax.set_xlabel("Γεωγρ. μήκος (°)", fontsize=12)
     ax.set_ylabel("Γεωγρ. πλάτος (°)", fontsize=12)
 
-    add_contours(ax, grid_x_m, grid_y_m, out)
+    add_contours_attica(ax, grid_x_m, grid_y_m, out)
 
     cbar = fig.colorbar(
         img,
