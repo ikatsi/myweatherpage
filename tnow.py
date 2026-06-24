@@ -2046,11 +2046,17 @@ def main():
     # 1) Attica first
     att_main, att_ts = make_tnow_attica_egsa(data, greece, DEM_PATH, athens_now)
 
-    # 2) Greece last
+    # 2) Extra regional maps
+    crete_main, crete_ts = make_tnow_crete_egsa(data, greece, DEM_PATH, athens_now)
+    ne_main, ne_ts = make_tnow_negreece_egsa(data, greece, DEM_PATH, athens_now)
+    nw_main, nw_ts = make_tnow_nwgreece_egsa(data, greece, DEM_PATH, athens_now)
+    sw_main, sw_ts = make_tnow_swgreece_egsa(data, greece, DEM_PATH, athens_now)
+
+    # 3) Greece last
     gr_main, gr_ts = make_tnow_greece_wgs(data, greece, DEM_PATH, athens_now)
 
     # Upload ONLY the stable filenames, keep timestamped copies local only
-    for p in [att_main, gr_main]:
+    for p in [att_main, crete_main, ne_main, nw_main, sw_main, gr_main]:
         if p and os.path.exists(p):
             try:
                 upload_to_ftp(p)
