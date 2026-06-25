@@ -2461,7 +2461,7 @@ def main():
         return
 
     if cyprus_data.empty:
-    print(f"❌ No usable Cyprus rows after freshness filter (older than {CY_MAX_AGE_MINUTES} minutes).")
+        print(f"❌ No usable Cyprus rows after freshness filter (older than {CY_MAX_AGE_MINUTES} minutes).")
 
 
     greece = gpd.read_file(GEOJSON_PATH)
@@ -2478,8 +2478,10 @@ def main():
     sw_main, sw_ts = make_tnow_swgreece_egsa(data, greece, DEM_PATH, athens_now)
 
     # 3) Cyprus, using the Cyprus-only relaxed freshness window
-    cy_main, cy_ts = make_tnow_cyprus_utm(cyprus_data, athens_now)
-
+    if not cyprus_data.empty:
+        cy_main, cy_ts = make_tnow_cyprus_utm(cyprus_data, athens_now)
+    else:
+        cy_main, cy_ts = None, None
     # 4) Greece last
     gr_main, gr_ts = make_tnow_greece_wgs(data, greece, DEM_PATH, athens_now)
 
