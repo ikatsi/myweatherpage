@@ -240,6 +240,10 @@ CY_MAX_DISTANCE_M = 40_000
 CY_MIN_NEIGHBORS = 3
 CY_DISTANCE_MASK_M = 40_000
 
+# Cyprus stations sometimes lag behind the latest Greece feed time.
+# Use a longer freshness window only for the Cyprus TNow map.
+CY_MAX_AGE_MINUTES = 180
+
 # Lapse-rate estimation in Attica (meters)
 LAPSE_DEFAULT = -0.0065
 LAPSE_MIN = -0.0150
@@ -2422,14 +2426,42 @@ def main():
         print("❌ No usable rows after cleaning.")
         return
 
-    # Freshness filter: keep only stations with Datetime <= 60 minutes old (Athens time)
-
+    # Freshness filters:
+    # - Greece and Greek regional maps keep the strict 60-minute rule.
+    # - Cyprus gets a separate, longer window because some Cyprus stations lag.
     athens_now = datetime.now(ZoneInfo("Europe/Athens"))
-    data = filter_fresh_rows(data, athens_now, max_age_minutes=60)
+
+    data_all_clean = data.copy()
+
+    data = filter_fresh_rows(data_all_clean, athens_now, max_age_minutes=60)
+
+    cyprus_data = filter_fresh_rows(
+        data_all_clean,
+        athens_now,
+        max_age_minutes=CY_MAX_AGE_MINUTES
+    )
+
+    # Keep only Cyprus bbox rows in the relaxed Cyprus dataframe.
+    cyprus_data = cyprus_data[
+        cyprus_data["Longitude"].between(CY_LON_MIN, CY_LON_MAX) &
+        cyprus_data["Latitude"].between(CY_LAT_MIN, CY_LAT_MAX)
+    ].copy()
+
+    # If the feed ever contains more than one row per station within the Cyprus
+    # relaxed window, keep only the newest one per station.
+    if "webcode" in cyprus_data.columns and "Datetime" in cyprus_data.columns:
+        cyprus_data = (
+            cyprus_data
+            .sort_values("Datetime")
+            .drop_duplicates(subset=["webcode"], keep="last")
+        )
 
     if data.empty:
-        print("❌ No usable rows after freshness filter (older than 60 minutes).")
+        print("❌ No usable rows after Greece freshness filter (older than 60 minutes).")
         return
+
+    if cyprus_data.empty:
+    print(f"❌ No usable Cyprus rows after freshness filter (older than {CY_MAX_AGE_MINUTES} minutes).")
 
 
     greece = gpd.read_file(GEOJSON_PATH)
@@ -2445,8 +2477,8 @@ def main():
     nw_main, nw_ts = make_tnow_nwgreece_egsa(data, greece, DEM_PATH, athens_now)
     sw_main, sw_ts = make_tnow_swgreece_egsa(data, greece, DEM_PATH, athens_now)
 
-    # 3) Cyprus
-    cy_main, cy_ts = make_tnow_cyprus_utm(data, athens_now)
+    # 3) Cyprus, using the Cyprus-only relaxed freshness window
+    cy_main, cy_ts = make_tnow_cyprus_utm(cyprus_data, athens_now)
 
     # 4) Greece last
     gr_main, gr_ts = make_tnow_greece_wgs(data, greece, DEM_PATH, athens_now)
