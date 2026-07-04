@@ -585,8 +585,6 @@ def add_top10_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
 
     box_text = (
         fmt_block(cold10, "Ψυχρότερες 10 περιοχές")
-        + "\n\n"
-        + fmt_block(hot10, "Θερμότερες 10 περιοχές")
     )
 
     # ---- add frost line (only when provided)
