@@ -137,8 +137,8 @@ NW_LAT_MIN, NW_LAT_MAX = 38.53, 40.94
 NW_N = 300
 
 # --- SW Greece bbox (EGSA approach like Attica/Crete/NE/NW Greece) ---
-SW_LON_MIN, SW_LON_MAX = 20.0, 24.0
-SW_LAT_MIN, SW_LAT_MAX = 36.0, 39.0
+SW_LON_MIN, SW_LON_MAX = 20.25, 23.78
+SW_LAT_MIN, SW_LAT_MAX = 36.0, 38.45
 SW_N = 300
 
 # --- Cyprus bbox (UTM 36N approach, same as rainintensityall.py) ---
