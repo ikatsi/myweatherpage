@@ -117,8 +117,8 @@ GR_N = 300
 GREECE_RASTERIZED_LAND_AREA_KM2 = 131595.026512276
 
 # --- Attica bbox: EXACTLY like your rain Attica script ---
-AT_LON_MIN, AT_LON_MAX = 22.7, 25.0
-AT_LAT_MIN, AT_LAT_MAX = 37.5, 38.7
+AT_LON_MIN, AT_LON_MAX = 22.8, 24.23
+AT_LAT_MIN, AT_LAT_MAX = 37.6, 38.38
 AT_N = 300
 
 # --- Crete bbox (same EGSA approach as Attica) ---
