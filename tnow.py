@@ -1160,7 +1160,9 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     # =========================
     # POPULATION-WEIGHTED STATISTICS
     # =========================
-    population_text = ""
+    pct_population_above_30_text = "–"
+    pct_population_above_37_text = "–"
+    pct_population_above_40_text = "–"
 
     try:
         population_grid = aggregate_population_to_greece_grid(
@@ -1214,19 +1216,6 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
             pct_population_above_40
         )
 
-        population_coverage_text = format_population_pct(
-            population_coverage_pct
-        )
-
-        population_text = (
-            "Εκτιμώμενο ποσοστό μόνιμου πληθυσμού\n"
-            "βάσει Απογραφής 2021 και παρεμβολής:\n"
-            f">30°C: {pct_population_above_30_text}\n"
-            f">37°C: {pct_population_above_37_text}\n"
-            f">40°C: {pct_population_above_40_text}\n"
-            f"Κάλυψη πληθυσμού: {population_coverage_text}"
-        )
-
         print(
             f"ℹ️ Gridded population total: "
             f"{total_population:,.0f}"
@@ -1248,9 +1237,10 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
             f"ℹ️ Population >40°C: "
             f"{pct_population_above_40:.1f}%"
         )
-
     except Exception as e:
-        population_text = ""
+        pct_population_above_30_text = "–"
+        pct_population_above_37_text = "–"
+        pct_population_above_40_text = "–"
         print(f"⚠️ Population calculation failed: {e}")
 
     print(f"ℹ️ National interpolation coverage: {mapped_area_km2:,.0f} km² ({coverage_pct:.1f}% of Greece)")
@@ -1329,12 +1319,17 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
 
         mm_text = (
             "Εύρος θερμοκρασιών στην ξηρά:\n"
-            f"{fmt_decimal_comma(display_min, 1)} έως {fmt_decimal_comma(display_max, 1)}°C\n\n"
-            "Ποσοστό έκτασης επικράτειας βάσει παρεμβολής:\n"
-            f">30°C: {pct_above_30_text}\n"
-            f">37°C: {pct_above_37_text}\n"
-            f">40°C: {pct_above_40_text}"
+            f"{fmt_decimal_comma(display_min, 1)} έως "
+            f"{fmt_decimal_comma(display_max, 1)}°C\n\n"
+            "Ποσοστό έκτασης | μόνιμου πληθυσμού:\n"
+            f">30°C: {pct_above_30_text} | "
+            f"{pct_population_above_30_text}\n"
+            f">37°C: {pct_above_37_text} | "
+            f"{pct_population_above_37_text}\n"
+            f">40°C: {pct_above_40_text} | "
+            f"{pct_population_above_40_text}"
         )
+        
         ax.text(
             0.01, 0.985, mm_text,
             transform=ax.transAxes,
@@ -1349,27 +1344,6 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
 
     add_top10_box_greece(ax, tt0, frost_text=frost_text)
-
-    # Population-exposure text in the Ionian Sea, immediately above
-    # the existing creation timestamp.
-    if population_text:
-        ax.text(
-            0.01, 0.085, population_text,
-            transform=ax.transAxes,
-            fontsize=8.2,
-            color="black",
-            ha="left",
-            va="bottom",
-            bbox=dict(
-                facecolor="none",
-                edgecolor="none",
-                boxstyle="round,pad=0.25"
-            ),
-            path_effects=[
-                pe.withStroke(linewidth=3.0, foreground="white")
-            ],
-            zorder=30
-        )
 
     ax.text(
         0.01, 0.01, stamp_text(athens_now),
