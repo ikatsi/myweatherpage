@@ -1,38 +1,32 @@
-name: Test Rain Intensity Lightning Maps
+name: Test Tnow maps
 
 on:
   workflow_dispatch:
 
+concurrency:
+  group: test-tnow-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
-  build-test-map:
+  run-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     env:
-      # Weather feed
+      MPLBACKEND: Agg
       PRIVATE_WEATHERNOW_URL: ${{ secrets.PRIVATE_WEATHERNOW_URL }}
       PRIVATE_WEATHERNOW_TOKEN: ${{ secrets.PRIVATE_WEATHERNOW_TOKEN }}
-
-      # Encrypted map/altitude assets
-      GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
-
-      # Optional branding
-      BRAND_NAME: ${{ secrets.BRAND_NAME }}
-
-      # Optional FTP upload, used only if your test.py sees all three
       FTP_HOST: ${{ secrets.FTP_HOST }}
       FTP_USER: ${{ secrets.FTP_USER }}
       FTP_PASS: ${{ secrets.FTP_PASS }}
-
-      # EUMETSAT MTG-LI lightning
-      EUMETSAT_CONSUMER_KEY: ${{ secrets.EUMETSAT_CONSUMER_KEY }}
-      EUMETSAT_CONSUMER_SECRET: ${{ secrets.EUMETSAT_CONSUMER_SECRET }}
-      LI_ENABLED: "1"
-      LI_COLLECTION_ID: "EO:EUM:DAT:0691"
-      LI_LOOKBACK_MIN: "30"
-      LI_MAX_PRODUCTS: "12"
+      GEOJSON_PASS: ${{ secrets.GEOJSON_PASS }}
+      STATION_EXCLUSION_RULES: ${{ secrets.STATION_EXCLUSION_RULES }}
 
     steps:
-      - name: Check out repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -40,28 +34,33 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y openssl
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-test-tnow-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-test-tnow-
+            ${{ runner.os }}-pip-tnow-
 
-      - name: Install Python dependencies
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install \
-            numpy \
-            pandas \
-            geopandas \
-            matplotlib \
-            scipy \
-            rasterio \
-            pyproj \
-            shapely \
-            requests \
-            eumdac \
-            netCDF4
+          pip install --only-binary=:all: \
+            numpy pandas matplotlib scipy requests \
+            rasterio shapely pyproj fiona geopandas
 
-      - name: Decrypt Cyprus GeoJSON if needed
+      - name: Decrypt greece.geojson if needed
+        if: ${{ hashFiles('greece.geojson') == '' }}
+        run: |
+          test -f greece.geojson.enc || { echo "greece.geojson.enc missing"; exit 1; }
+          test -n "${GEOJSON_PASS}" || { echo "GEOJSON_PASS not set"; exit 1; }
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in greece.geojson.enc \
+            -out greece.geojson \
+            -pass pass:"${GEOJSON_PASS}"
+
+      - name: Decrypt cyprus.geojson if needed
         if: ${{ hashFiles('cyprus.geojson') == '' }}
         run: |
           test -f cyprus.geojson.enc || { echo "cyprus.geojson.enc missing"; exit 1; }
@@ -81,17 +80,31 @@ jobs:
             -out cyprus_dsm_90m.tif \
             -pass pass:"${GEOJSON_PASS}"
 
-      - name: Run Greece and Cyprus test maps
+      - name: Verify population raster
+        run: |
+          test -f GRC_population_2021_100m.tif || {
+            echo "GRC_population_2021_100m.tif missing"
+            exit 1
+          }
+          ls -lh GRC_population_2021_100m.tif
+
+      - name: Check test.py syntax
+        run: |
+          python -m py_compile test.py
+
+      - name: Run test.py and upload maps
         run: |
           python test.py
 
-      - name: Upload generated PNGs as workflow artifact
-        uses: actions/upload-artifact@v4
+      - name: Verify tnow.png was produced
+        run: |
+          test -f Tnowmaps/tnow.png || {
+            echo "Tnowmaps/tnow.png was not produced"
+            exit 1
+          }
+          ls -lh Tnowmaps/tnow.png
+
+      - name: Cleanup local outputs
         if: always()
-        with:
-          name: test-rainintensity-lightning-output
-          path: |
-            rainintensitymaps/*.png
-            cyprusrainintensitymaps/*.png
-            *.log
-          if-no-files-found: warn
+        run: |
+          rm -rf Tnowmaps || true
