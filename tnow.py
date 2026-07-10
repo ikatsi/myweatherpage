@@ -56,6 +56,8 @@ from scipy.spatial import cKDTree
 
 import requests
 import rasterio
+from rasterio.transform import from_bounds
+from rasterio.warp import reproject, Resampling
 from pyproj import Transformer
 from ftplib import FTP_TLS
 
@@ -93,6 +95,7 @@ warnings.filterwarnings(
 BASE_DIR = os.path.abspath(os.path.dirname(__file__) or ".")
 GEOJSON_PATH = os.path.join(BASE_DIR, "greece.geojson")
 DEM_PATH = os.path.join(BASE_DIR, "GRC_alt.vrt")
+POPULATION_PATH = os.path.join(BASE_DIR, "GRC_population_2021_100m.tif")
 
 # All sensitive values are injected via environment variables by the CI runner.
 # You created these in GitHub → Settings → Secrets and variables → Actions.
@@ -519,6 +522,83 @@ def sample_raster_xy(raster_path: str, xs, ys, input_crs: str) -> np.ndarray:
         arr = np.where(np.isfinite(arr), arr, 0.0)
 
     return arr
+
+def aggregate_population_to_greece_grid(
+    population_raster_path: str
+) -> np.ndarray:
+    """
+    Aggregate the Greece 100 m population-count raster onto the same
+    GR_N x GR_N grid used by the national temperature interpolation.
+
+    The returned array has the same south-to-north row orientation as `out`.
+    Population totals are conserved through Resampling.sum.
+    """
+    if not os.path.exists(population_raster_path):
+        raise FileNotFoundError(
+            f"Population raster not found at: {population_raster_path}"
+        )
+
+    # Your temperature grid includes both bbox endpoints as cell centres.
+    # Extend the raster bounds by half a grid step so that destination-cell
+    # centres correspond exactly to grid_x and grid_y.
+    dx = (GR_LON_MAX - GR_LON_MIN) / max(GR_N - 1, 1)
+    dy = (GR_LAT_MAX - GR_LAT_MIN) / max(GR_N - 1, 1)
+
+    west = GR_LON_MIN - (dx / 2.0)
+    east = GR_LON_MAX + (dx / 2.0)
+    south = GR_LAT_MIN - (dy / 2.0)
+    north = GR_LAT_MAX + (dy / 2.0)
+
+    destination_north_up = np.zeros(
+        (GR_N, GR_N),
+        dtype=np.float64
+    )
+
+    destination_transform = from_bounds(
+        west,
+        south,
+        east,
+        north,
+        GR_N,
+        GR_N
+    )
+
+    with rasterio.open(population_raster_path) as src:
+        if src.crs is None:
+            raise RuntimeError("Population raster has no CRS defined.")
+
+        # Keep nodata distinct in the source file, but treat it as zero
+        # population during the aggregation.
+        source_population = (
+            src.read(1, masked=True)
+            .filled(0)
+            .astype(np.float64)
+        )
+
+        source_population[~np.isfinite(source_population)] = 0.0
+        source_population[source_population < 0.0] = 0.0
+
+        reproject(
+            source=source_population,
+            destination=destination_north_up,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=destination_transform,
+            dst_crs=CRS_WGS84,
+            resampling=Resampling.sum,
+            src_nodata=None,
+            dst_nodata=0.0,
+            init_dest_nodata=True
+        )
+
+    # Rasterio arrays begin in the north. Your temperature array begins
+    # in the south because grid_y increases from south to north.
+    population_grid = np.flipud(destination_north_up)
+
+    population_grid[~np.isfinite(population_grid)] = 0.0
+    population_grid[population_grid < 0.0] = 0.0
+
+    return population_grid
 
 # =========================
 # MASKS / CONTOURS / STAMP
@@ -1029,8 +1109,8 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
 
     t_grid = t0_grid + (lapse_grid * grid_elev)
 
-    # Display only Greek land cells with a reporting station within 0.8 degrees.
-    dist_mask = build_distance_mask(grid_x, grid_y, st_lons, st_lats, max_dist=0.8)
+    # Display only Greek land cells with a reporting station within 1.0 degree.
+    dist_mask = build_distance_mask(grid_x, grid_y, st_lons, st_lats, max_dist=1.0)
     final_mask = geo_mask & dist_mask & np.isfinite(grid_elev)
 
     # The national map now uses this single ordinary altitude-adjusted IDW field.
@@ -1076,6 +1156,102 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     pct_above_30 = pct_area_above(30.0)
     pct_above_37 = pct_area_above(37.0)
     pct_above_40 = pct_area_above(40.0)
+
+    # =========================
+    # POPULATION-WEIGHTED STATISTICS
+    # =========================
+    population_text = ""
+
+    try:
+        population_grid = aggregate_population_to_greece_grid(
+            POPULATION_PATH
+        )
+
+        # The source raster has already been cropped to Greece.
+        # Its full aggregated sum is therefore the national denominator.
+        total_population = float(np.sum(population_grid))
+
+        # Population for which the current temperature field is available.
+        mapped_population = float(
+            np.sum(population_grid[mapped_mask])
+        )
+
+        if total_population <= 0.0:
+            raise RuntimeError(
+                "Aggregated population raster has no positive population."
+            )
+
+        population_coverage_pct = (
+            100.0 * mapped_population / total_population
+        )
+
+        def pct_population_above(threshold_c: float) -> float:
+            exposed_mask = mapped_mask & (out > threshold_c)
+
+            exposed_population = float(
+                np.sum(population_grid[exposed_mask])
+            )
+
+            return 100.0 * exposed_population / total_population
+
+        pct_population_above_30 = pct_population_above(30.0)
+        pct_population_above_37 = pct_population_above(37.0)
+        pct_population_above_40 = pct_population_above(40.0)
+
+        def format_population_pct(pct_value: float) -> str:
+            if 0.0 < pct_value < 0.1:
+                return "<0,1%"
+
+            return fmt_decimal_comma(pct_value, 1) + "%"
+
+        pct_population_above_30_text = format_population_pct(
+            pct_population_above_30
+        )
+        pct_population_above_37_text = format_population_pct(
+            pct_population_above_37
+        )
+        pct_population_above_40_text = format_population_pct(
+            pct_population_above_40
+        )
+
+        population_coverage_text = format_population_pct(
+            population_coverage_pct
+        )
+
+        population_text = (
+            "Εκτιμώμενο ποσοστό μόνιμου πληθυσμού\n"
+            "βάσει Απογραφής 2021 και παρεμβολής:\n"
+            f">30°C: {pct_population_above_30_text}\n"
+            f">37°C: {pct_population_above_37_text}\n"
+            f">40°C: {pct_population_above_40_text}\n"
+            f"Κάλυψη πληθυσμού: {population_coverage_text}"
+        )
+
+        print(
+            f"ℹ️ Gridded population total: "
+            f"{total_population:,.0f}"
+        )
+        print(
+            f"ℹ️ Population represented by interpolation: "
+            f"{mapped_population:,.0f} "
+            f"({population_coverage_pct:.1f}%)"
+        )
+        print(
+            f"ℹ️ Population >30°C: "
+            f"{pct_population_above_30:.1f}%"
+        )
+        print(
+            f"ℹ️ Population >37°C: "
+            f"{pct_population_above_37:.1f}%"
+        )
+        print(
+            f"ℹ️ Population >40°C: "
+            f"{pct_population_above_40:.1f}%"
+        )
+
+    except Exception as e:
+        population_text = ""
+        print(f"⚠️ Population calculation failed: {e}")
 
     print(f"ℹ️ National interpolation coverage: {mapped_area_km2:,.0f} km² ({coverage_pct:.1f}% of Greece)")
     print(f"ℹ️ Area >30°C: {pct_above_30:.1f}% of Greece")
@@ -1173,6 +1349,27 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
     ax.set_ylabel("Γεωγρ. πλάτος", fontsize=12)
 
     add_top10_box_greece(ax, tt0, frost_text=frost_text)
+
+    # Population-exposure text in the Ionian Sea, immediately above
+    # the existing creation timestamp.
+    if population_text:
+        ax.text(
+            0.01, 0.085, population_text,
+            transform=ax.transAxes,
+            fontsize=8.2,
+            color="black",
+            ha="left",
+            va="bottom",
+            bbox=dict(
+                facecolor="none",
+                edgecolor="none",
+                boxstyle="round,pad=0.25"
+            ),
+            path_effects=[
+                pe.withStroke(linewidth=3.0, foreground="white")
+            ],
+            zorder=30
+        )
 
     ax.text(
         0.01, 0.01, stamp_text(athens_now),
