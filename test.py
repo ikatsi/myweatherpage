@@ -1109,8 +1109,8 @@ def make_tnow_greece_wgs(df, greece_gdf_wgs, dem_path, athens_now):
 
     t_grid = t0_grid + (lapse_grid * grid_elev)
 
-    # Display only Greek land cells with a reporting station within 0.8 degrees.
-    dist_mask = build_distance_mask(grid_x, grid_y, st_lons, st_lats, max_dist=0.8)
+    # Display only Greek land cells with a reporting station within 1.0 degree.
+    dist_mask = build_distance_mask(grid_x, grid_y, st_lons, st_lats, max_dist=1.0)
     final_mask = geo_mask & dist_mask & np.isfinite(grid_elev)
 
     # The national map now uses this single ordinary altitude-adjusted IDW field.
