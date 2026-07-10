@@ -65,6 +65,8 @@ from scipy.spatial import cKDTree
 import requests
 from ftplib import FTP_TLS
 import rasterio
+from rasterio.transform import from_bounds
+from rasterio.warp import reproject, Resampling
 from pyproj import Transformer
 from common_abbrev import shorten_for_box
 import json
@@ -100,6 +102,7 @@ BASE_DIR = os.path.abspath(os.path.dirname(__file__) or ".")
 
 GEOJSON_PATH = os.path.join(BASE_DIR, "greece.geojson")
 DEM_PATH = os.path.join(BASE_DIR, "GRC_alt.vrt")
+POPULATION_PATH = os.path.join(BASE_DIR, "GRC_population_2021_100m.tif")
 
 GEOJSON_ENC = os.path.join(BASE_DIR, "greece.geojson.enc")
 ALT_ENC = os.path.join(BASE_DIR, "altitude.zip.enc")
@@ -603,6 +606,99 @@ def build_latitude_weighted_cell_area_km2(grid_y) -> np.ndarray:
         * np.cos(np.deg2rad(grid_y))
     )
 
+def aggregate_population_to_national_grid(
+    population_raster_path: str
+) -> np.ndarray:
+    """
+    Aggregate the Greece 100 m population-count raster onto the same
+    GRID_N x GRID_N grid used by the national temperature maps.
+
+    The returned array has the same south-to-north row orientation
+    as the national temperature array `out`.
+    """
+    if not os.path.exists(population_raster_path):
+        raise FileNotFoundError(
+            f"Population raster not found at: {population_raster_path}"
+        )
+
+    # The national temperature grid treats the specified coordinates
+    # as cell centres, including both endpoints.
+    dx = (
+        (GRID_LON_MAX - GRID_LON_MIN)
+        / max(GRID_N - 1, 1)
+    )
+    dy = (
+        (GRID_LAT_MAX - GRID_LAT_MIN)
+        / max(GRID_N - 1, 1)
+    )
+
+    west = GRID_LON_MIN - (dx / 2.0)
+    east = GRID_LON_MAX + (dx / 2.0)
+    south = GRID_LAT_MIN - (dy / 2.0)
+    north = GRID_LAT_MAX + (dy / 2.0)
+
+    destination_north_up = np.zeros(
+        (GRID_N, GRID_N),
+        dtype=np.float64
+    )
+
+    destination_transform = from_bounds(
+        west,
+        south,
+        east,
+        north,
+        GRID_N,
+        GRID_N
+    )
+
+    with rasterio.open(population_raster_path) as src:
+        if src.crs is None:
+            raise RuntimeError(
+                "Population raster has no CRS defined."
+            )
+
+        source_population = (
+            src.read(1, masked=True)
+            .filled(0)
+            .astype(np.float64)
+        )
+
+        source_population[
+            ~np.isfinite(source_population)
+        ] = 0.0
+
+        source_population[
+            source_population < 0.0
+        ] = 0.0
+
+        reproject(
+            source=source_population,
+            destination=destination_north_up,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=destination_transform,
+            dst_crs=CRS_WGS84,
+            resampling=Resampling.sum,
+            src_nodata=None,
+            dst_nodata=0.0,
+            init_dest_nodata=True
+        )
+
+    # Rasterio arrays begin at the northern edge, whereas the
+    # national temperature grid begins at the southern edge.
+    population_grid = np.flipud(
+        destination_north_up
+    )
+
+    population_grid[
+        ~np.isfinite(population_grid)
+    ] = 0.0
+
+    population_grid[
+        population_grid < 0.0
+    ] = 0.0
+
+    return population_grid
 
 def estimate_local_lapse_rates(st_lons, st_lats, st_temp, st_elev,
                                k=12, max_deg=1.2,
@@ -1261,7 +1357,7 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
 
     temp_grid = t0_grid + (lapse_grid * grid_elev)
 
-    dist_mask = build_distance_mask(grid_x, grid_y, st_lons, st_lats, max_deg=1.5)
+    dist_mask = build_distance_mask(grid_x, grid_y, st_lons, st_lats, max_deg=1.0)
     final_mask = geo_mask & dist_mask & np.isfinite(grid_elev)
 
     out = np.full(grid_x.shape, np.nan)
@@ -1287,8 +1383,19 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
 
     def pct_area_below(threshold_c: float) -> float:
         threshold_mask = mapped_mask & (out < threshold_c)
-        area_km2 = float(np.sum(cell_area_km2[threshold_mask]))
-        return 100.0 * area_km2 / GREECE_RASTERIZED_LAND_AREA_KM2
+        area_km2 = float(
+            np.sum(cell_area_km2[threshold_mask])
+        )
+        return (
+            100.0
+            * area_km2
+            / GREECE_RASTERIZED_LAND_AREA_KM2
+        )
+
+    # Defaults used only if the Tmax population calculation fails.
+    pct_population_above_30_text = "–"
+    pct_population_above_37_text = "–"
+    pct_population_above_40_text = "–"
 
     if var_col == "TMin":
         pct_below_0 = pct_area_below(0.0)
@@ -1307,6 +1414,126 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
         pct_above_30 = pct_area_above(30.0)
         pct_above_37 = pct_area_above(37.0)
         pct_above_40 = pct_area_above(40.0)
+
+        # =========================
+        # TMAX POPULATION STATISTICS
+        # =========================
+        try:
+            population_grid = (
+                aggregate_population_to_national_grid(
+                    POPULATION_PATH
+                )
+            )
+
+            total_population = float(
+                np.sum(population_grid)
+            )
+
+            mapped_population = float(
+                np.sum(population_grid[mapped_mask])
+            )
+
+            if total_population <= 0.0:
+                raise RuntimeError(
+                    "Aggregated population raster "
+                    "has no positive population."
+                )
+
+            population_coverage_pct = (
+                100.0
+                * mapped_population
+                / total_population
+            )
+
+            def pct_population_above(
+                threshold_c: float
+            ) -> float:
+                exposed_mask = (
+                    mapped_mask
+                    & (out > threshold_c)
+                )
+
+                exposed_population = float(
+                    np.sum(
+                        population_grid[exposed_mask]
+                    )
+                )
+
+                return (
+                    100.0
+                    * exposed_population
+                    / total_population
+                )
+
+            pct_population_above_30 = (
+                pct_population_above(30.0)
+            )
+            pct_population_above_37 = (
+                pct_population_above(37.0)
+            )
+            pct_population_above_40 = (
+                pct_population_above(40.0)
+            )
+
+            def format_population_pct(
+                pct_value: float
+            ) -> str:
+                if 0.0 < pct_value < 0.1:
+                    return "<0,1%"
+
+                return (
+                    f"{pct_value:.1f}%"
+                    .replace(".", ",")
+                )
+
+            pct_population_above_30_text = (
+                format_population_pct(
+                    pct_population_above_30
+                )
+            )
+            pct_population_above_37_text = (
+                format_population_pct(
+                    pct_population_above_37
+                )
+            )
+            pct_population_above_40_text = (
+                format_population_pct(
+                    pct_population_above_40
+                )
+            )
+
+            print(
+                f"ℹ️ Tmax gridded population total: "
+                f"{total_population:,.0f}"
+            )
+            print(
+                f"ℹ️ Tmax population represented "
+                f"by interpolation: "
+                f"{mapped_population:,.0f} "
+                f"({population_coverage_pct:.1f}%)"
+            )
+            print(
+                f"ℹ️ Tmax population >30°C: "
+                f"{pct_population_above_30:.1f}%"
+            )
+            print(
+                f"ℹ️ Tmax population >37°C: "
+                f"{pct_population_above_37:.1f}%"
+            )
+            print(
+                f"ℹ️ Tmax population >40°C: "
+                f"{pct_population_above_40:.1f}%"
+            )
+
+        except Exception as e:
+            pct_population_above_30_text = "–"
+            pct_population_above_37_text = "–"
+            pct_population_above_40_text = "–"
+
+            print(
+                f"⚠️ Tmax population calculation "
+                f"failed: {e}"
+            )
 
         # Prominent contour lines for the Tmax map.
         special_levels = [0.0, 10.0, 20.0, 25.0, 30.0, 37.0, 40.0]
@@ -1330,12 +1557,14 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
         pct_above_40_text = format_pct_with_observed_floor(pct_above_40, 40.0)
 
         stats_text = (
-            "Ποσοστό έκτασης επικράτειας βάσει παρεμβολής:\n"
-            f">30°C: {pct_above_30_text}\n"
-            f">37°C: {pct_above_37_text}\n"
-            f">40°C: {pct_above_40_text}"
+            "Ποσοστό έκτασης | μόνιμου πληθυσμού:\n"
+            f">30°C: {pct_above_30_text} | "
+            f"{pct_population_above_30_text}\n"
+            f">37°C: {pct_above_37_text} | "
+            f"{pct_population_above_37_text}\n"
+            f">40°C: {pct_above_40_text} | "
+            f"{pct_population_above_40_text}"
         )
-
         print(f"ℹ️ {var_col} area >30°C: {pct_above_30:.1f}% of Greece")
         print(f"ℹ️ {var_col} area >37°C: {pct_above_37:.1f}% of Greece")
         print(f"ℹ️ {var_col} area >40°C: {pct_above_40:.1f}% of Greece")
