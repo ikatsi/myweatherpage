@@ -663,14 +663,11 @@ def add_top10_box_greece(ax, tt0: pd.DataFrame, frost_text: str = "") -> None:
             i += 1
         return "\n".join(lines)
 
-    box_text = (
-        fmt_block(cold10, "Ψυχρότερες 10 περιοχές")
-    )
+    box_text = frost_text
 
-    # ---- add frost line (only when provided)
-    if frost_text:
-        box_text = box_text + "\n\n" + frost_text
-
+    if not box_text:
+        return
+        
     # Transparent box (no background), keep readability with white stroke
     ax.text(
         0.99, 0.99, box_text,
