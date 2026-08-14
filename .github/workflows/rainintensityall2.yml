@@ -1,0 +1,225 @@
+# bump: 2026-08-14-mtg-li
+name: Build rain intensity maps (all regions + MTG lightning)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: rain-all-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      MPLBACKEND: Agg
+
+      PRIVATE_WEATHERNOW_URL:   ${{ secrets.PRIVATE_WEATHERNOW_URL }}
+      PRIVATE_WEATHERNOW_TOKEN: ${{ secrets.PRIVATE_WEATHERNOW_TOKEN }}
+
+      EUMETSAT_CONSUMER_KEY:    ${{ secrets.EUMETSAT_CONSUMER_KEY }}
+      EUMETSAT_CONSUMER_SECRET: ${{ secrets.EUMETSAT_CONSUMER_SECRET }}
+
+      GEOJSON_PASS:             ${{ secrets.GEOJSON_PASS }}
+      FTP_HOST:                 ${{ secrets.FTP_HOST }}
+      FTP_USER:                 ${{ secrets.FTP_USER }}
+      FTP_PASS:                 ${{ secrets.FTP_PASS }}
+      BRAND_NAME:               ${{ secrets.BRAND_NAME }}
+      STATION_EXCLUSION_RULES:  ${{ secrets.STATION_EXCLUSION_RULES }}
+
+      # Optional MTG Lightning Imager settings
+      LIGHTNING_WINDOW_MIN: "15"
+      LIGHTNING_QUERY_LOOKBACK_MIN: "15"
+      LIGHTNING_CACHE_MAX_AGE_MIN: "5"
+      LIGHTNING_MIN_SEP_DEG: "0.12"
+      LIGHTNING_MAX_ICONS: "500"
+      LIGHTNING_FONTSIZE: "10"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sanity check encrypted assets exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -lh \
+            greece.geojson.enc \
+            altitude.zip.enc \
+            cyprus.geojson.enc \
+            cyprus.tif.enc
+
+      - name: Ensure unzip is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v unzip >/dev/null 2>&1 || {
+            sudo apt-get update
+            sudo apt-get install -y unzip
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+
+          python -m pip install --only-binary=:all: \
+            numpy \
+            pandas \
+            matplotlib \
+            scipy \
+            requests \
+            rasterio \
+            shapely \
+            pyproj \
+            fiona \
+            geopandas \
+            pyogrio \
+            netCDF4
+
+          python -m pip install eumdac
+
+      - name: Verify EUMETSAT secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${EUMETSAT_CONSUMER_KEY}" || {
+            echo "EUMETSAT_CONSUMER_KEY is not set"
+            exit 1
+          }
+          test -n "${EUMETSAT_CONSUMER_SECRET}" || {
+            echo "EUMETSAT_CONSUMER_SECRET is not set"
+            exit 1
+          }
+          echo "EUMETSAT credentials are available."
+
+      - name: Verify Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -c "import eumdac; import netCDF4; print('EUMDAC and netCDF4 imports successful')"
+
+      - name: Decrypt Greece GeoJSON
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GEOJSON_PASS}" || {
+            echo "GEOJSON_PASS not set"
+            exit 1
+          }
+          test -f greece.geojson.enc || {
+            echo "greece.geojson.enc missing"
+            exit 1
+          }
+
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in greece.geojson.enc \
+            -out greece.geojson \
+            -pass pass:"${GEOJSON_PASS}"
+
+          ls -lh greece.geojson
+
+      - name: Decrypt Greece altitude bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GEOJSON_PASS}" || {
+            echo "GEOJSON_PASS not set"
+            exit 1
+          }
+          test -f altitude.zip.enc || {
+            echo "altitude.zip.enc missing"
+            exit 1
+          }
+
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in altitude.zip.enc \
+            -out altitude.zip \
+            -pass pass:"${GEOJSON_PASS}"
+
+          unzip -o altitude.zip
+          rm -f altitude.zip
+
+          test -f GRC_alt.vrt || {
+            echo "GRC_alt.vrt missing after unzip"
+            exit 1
+          }
+
+          ls -lh GRC_alt.vrt
+
+      - name: Decrypt Cyprus GeoJSON
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GEOJSON_PASS}" || {
+            echo "GEOJSON_PASS not set"
+            exit 1
+          }
+          test -f cyprus.geojson.enc || {
+            echo "cyprus.geojson.enc missing"
+            exit 1
+          }
+
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in cyprus.geojson.enc \
+            -out cyprus.geojson \
+            -pass pass:"${GEOJSON_PASS}"
+
+          ls -lh cyprus.geojson
+
+      - name: Decrypt Cyprus altitude GeoTIFF
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GEOJSON_PASS}" || {
+            echo "GEOJSON_PASS not set"
+            exit 1
+          }
+          test -f cyprus.tif.enc || {
+            echo "cyprus.tif.enc missing"
+            exit 1
+          }
+
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -in cyprus.tif.enc \
+            -out cyprus_dsm_90m.tif \
+            -pass pass:"${GEOJSON_PASS}"
+
+          ls -lh cyprus_dsm_90m.tif
+
+      - name: Run rainintensityall2.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -V
+          python rainintensityall2.py --region all
+
+      - name: Upload PNG artifacts (Greece and EGSA)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rainintensity_greece_egsa_mtg_li
+          path: rainintensitymaps/*.png
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload PNG artifacts (Cyprus)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rainintensity_cyprus
+          path: cyprusrainintensitymaps/*.png
+          if-no-files-found: warn
+          retention-days: 7
