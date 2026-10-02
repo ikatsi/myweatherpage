@@ -18,6 +18,8 @@ jobs:
       MPLBACKEND: Agg
       PRIVATE_WEATHERNOW_URL:   ${{ secrets.PRIVATE_WEATHERNOW_URL }}
       PRIVATE_WEATHERNOW_TOKEN: ${{ secrets.PRIVATE_WEATHERNOW_TOKEN }}
+      PRIVATE_CURRENTMONTH_URL: ${{ secrets.PRIVATE_CURRENTMONTH_URL }}
+      PRIVATE_CURRENTMONTH_TOKEN: ${{ secrets.PRIVATE_CURRENTMONTH_TOKEN }}
       FTP_HOST:                 ${{ secrets.FTP_HOST }}
       FTP_USER:                 ${{ secrets.FTP_USER }}
       FTP_PASS:                 ${{ secrets.FTP_PASS }}
