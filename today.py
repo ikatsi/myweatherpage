@@ -110,8 +110,6 @@ ALT_ZIP = os.path.join(BASE_DIR, "altitude.zip")
 
 DATA_URL = os.environ.get("PRIVATE_WEATHERNOW_URL", "").strip()
 PRIVATE_WEATHERNOW_TOKEN = os.environ.get("PRIVATE_WEATHERNOW_TOKEN", "").strip()
-PRIVATE_CURRENTMONTH_URL = os.environ.get("PRIVATE_CURRENTMONTH_URL", "").strip()
-PRIVATE_CURRENTMONTH_TOKEN = os.environ.get("PRIVATE_CURRENTMONTH_TOKEN", "").strip()
 FTP_HOST = os.environ.get("FTP_HOST", "").strip()
 FTP_USER = os.environ.get("FTP_USER", "").strip()
 FTP_PASS = os.environ.get("FTP_PASS", "").strip()
@@ -1178,66 +1176,33 @@ def prepare_temp_data(today_data: pd.DataFrame, on_date) -> pd.DataFrame:
 # NATIONAL MAPS
 # =========================
 
-def prepare_storm_data(athens_now: datetime) -> pd.DataFrame:
-    if not PRIVATE_CURRENTMONTH_URL:
-        raise RuntimeError("PRIVATE_CURRENTMONTH_URL is not set.")
-
-    if not PRIVATE_CURRENTMONTH_TOKEN:
-        raise RuntimeError("PRIVATE_CURRENTMONTH_TOKEN is not set.")
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "X-EKairos-Token": PRIVATE_CURRENTMONTH_TOKEN,
-    }
-
-    last_exc = None
-    feed_text = None
-
-    for i in range(MAX_RETRIES):
-        try:
-            response = requests.get(
-                PRIVATE_CURRENTMONTH_URL,
-                headers=headers,
-                timeout=TIMEOUT
-            )
-            response.raise_for_status()
-            response.encoding = "utf-8"
-            feed_text = response.text
-            break
-        except requests.exceptions.RequestException as e:
-            last_exc = e
-            print(f"Storm feed attempt {i + 1} failed.")
-            if i < MAX_RETRIES - 1:
-                time.sleep(DELAY)
-
-    if feed_text is None:
-        raise RuntimeError("Could not download the storm-total feed.") from last_exc
-
+def prepare_storm_data(feed_text: str, athens_now: datetime) -> pd.DataFrame:
     storm = read_tabbed_df(feed_text)
 
-    required = {"webcode", "latitude", "longitude", "storm_total"}
+    required = {"webcode", "Latitude", "Longitude", "storm_total"}
     missing = required - set(storm.columns)
+
     if missing:
         raise RuntimeError(
-            "Storm feed is missing columns: " + ", ".join(sorted(missing))
+            "Weather feed is missing storm columns: "
+            + ", ".join(sorted(missing))
         )
 
-    storm.rename(
-        columns={
-            "latitude": "Latitude",
-            "longitude": "Longitude",
-            "storm_total": "TodayRain",
-        },
-        inplace=True
+    # Use storm totals as the rainfall values for this map only.
+    # TodayRain already exists in the feed, so overwrite it here.
+    storm["TodayRain"] = pd.to_numeric(
+        storm["storm_total"],
+        errors="coerce"
     )
 
-    for col in ["Latitude", "Longitude", "TodayRain"]:
+    for col in ["Latitude", "Longitude"]:
         storm[col] = pd.to_numeric(storm[col], errors="coerce")
 
     storm.dropna(
         subset=["Latitude", "Longitude", "TodayRain"],
         inplace=True
     )
+
     storm = storm[
         (storm["Latitude"] != 0)
         & (storm["Longitude"] != 0)
@@ -2123,7 +2088,7 @@ def main():
     storm_main = None
 
     try:
-        storm_input = prepare_storm_data(athens_now)
+        storm_input = prepare_storm_data(text, athens_now)
         storm_main, _ = make_todayrain_map_national(
             storm_input, greece, grid_x, grid_y, geo_mask,
             cell_area_km2, rain_dir, athens_now,
