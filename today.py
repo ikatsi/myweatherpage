@@ -2084,21 +2084,6 @@ def main():
         cell_area_km2, rain_dir, athens_now
     )
 
-    # -------- Storm total --------
-    storm_main = None
-
-    try:
-        storm_input = prepare_storm_data(text, athens_now)
-        storm_main, _ = make_todayrain_map_national(
-            storm_input, greece, grid_x, grid_y, geo_mask,
-            cell_area_km2, rain_dir, athens_now,
-            stable_name="stormtotal.png",
-            title="Υπολογισμ. σωρευτικός υετός τρέχοντος επεισοδίου",
-            empty_box_title="Υετός τρέχοντος επεισοδίου",
-            empty_box_message="Δεν υπάρχει καταγεγραμμένος υετός τρέχοντος επεισοδίου."
-        )
-    except Exception as e:
-        print(f"⚠️ Storm-total map could not be generated: {e}")
 
     # -------- Temperature-family input (for both Tmin and Tmax) --------
     temp_input = prepare_temp_data(today_data, athens_now.date())
@@ -2162,8 +2147,6 @@ def main():
         (tmax_attica, "tmax_attica.png"),
     ]
 
-    if storm_main is not None:
-        uploads.append((storm_main, "stormtotal.png"))
     try:
         upload_all_to_ftp(uploads)
     except Exception as e:
