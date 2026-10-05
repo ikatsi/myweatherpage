@@ -78,7 +78,7 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "X-EKairos-Token": CURRENTMONTH_TOKEN,
 }
-TIMEOUT = 15
+TIMEOUT = (15, 120)
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__) or ".")
 ALT_ENC = os.path.join(BASE_DIR, "altitude.zip.enc")
