@@ -624,13 +624,15 @@ def plot_mtg_li_icons(ax, bbox, transform_xy=None):
 # =============================================================================
 # FTP HELPERS (optional)
 # =============================================================================
-def ftp_upload_file(local_file: str, timeout: int = 60):
+def ftp_upload_file(local_file: str, timeout: int = 60, ftps=None):
     if not ftp_enabled():
         print("ℹ️ FTP disabled (missing env). Skipping upload.")
         return
 
     remote_filename = os.path.basename(local_file)
-    ftps = ftps_connect_with_retries(FTP_HOST, FTP_USER, FTP_PASS, attempts=6, base_sleep=5, timeout=timeout)
+    own_connection = ftps is None
+    if own_connection:
+        ftps = ftps_connect_with_retries(FTP_HOST, FTP_USER, FTP_PASS, attempts=6, base_sleep=5, timeout=timeout)
 
     try:
         with open(local_file, "rb") as f:
@@ -638,12 +640,13 @@ def ftp_upload_file(local_file: str, timeout: int = 60):
         print(f"📤 Uploaded: {remote_filename}")
     finally:
         try:
-            ftps.quit()
+            if own_connection:
+                ftps.quit()
         except Exception:
             pass
 
 
-def ftp_prune_timestamped(prefix: str, latest_name: str, keep: int):
+def ftp_prune_timestamped(prefix: str, latest_name: str, keep: int, ftps=None):
     """
     Delete old timestamped PNGs matching:
       {prefix}YYYY-MM-DD-HH-MM.png   (or prefix + digits with same pattern)
@@ -658,7 +661,9 @@ def ftp_prune_timestamped(prefix: str, latest_name: str, keep: int):
 
     pat = re.compile(rf"^{re.escape(prefix)}\d{{4}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}}\.png$")
 
-    ftps = ftps_connect_with_retries(FTP_HOST, FTP_USER, FTP_PASS, attempts=6, base_sleep=5, timeout=60)
+    own_connection = ftps is None
+    if own_connection:
+        ftps = ftps_connect_with_retries(FTP_HOST, FTP_USER, FTP_PASS, attempts=6, base_sleep=5, timeout=60)
 
 
     try:
@@ -690,7 +695,8 @@ def ftp_prune_timestamped(prefix: str, latest_name: str, keep: int):
 
     finally:
         try:
-            ftps.quit()
+            if own_connection:
+                ftps.quit()
         except Exception:
             pass
 
@@ -1217,7 +1223,7 @@ def run_greece():
 
     # Fetch
     try:
-        text, source = robust_fetch_text(CURRENTWEATHER_URL, cache_txt=cache_txt, timeout=60, tries=6)
+        text, source = shared_weather_feed(CURRENTWEATHER_URL, cache_txt=cache_txt, timeout=60, tries=6)
         print("source:", source)
         with open(cache_txt, "w", encoding="utf-8") as f:
             f.write(text)
@@ -1281,7 +1287,7 @@ def run_greece():
     )
 
     # geometry mask
-    greece = gpd.read_file(GREECE_GEOJSON_PATH)
+    greece = shared_greece_geometry()
     if greece.crs is None:
         greece = greece.set_crs("EPSG:4326")
     if greece.crs.to_string() != "EPSG:4326":
@@ -1459,9 +1465,7 @@ def run_greece():
 
     # FTP
     try:
-        ftp_upload_file(out_png)
-        ftp_upload_file(out_latest)
-        ftp_prune_timestamped(prefix=prefix, latest_name=latest_name, keep=216)
+        ftp_publish_map((out_png, out_latest), prefix, latest_name, 216)
     except Exception as e:
         print(f"⚠️ FTP upload/prune failed: {e}")
 
@@ -1516,7 +1520,7 @@ def run_egsa_region(cfg: dict):
 
     # fetch
     try:
-        text, source = robust_fetch_text(CURRENTWEATHER_URL, cache_txt=cache_txt, timeout=60, tries=6)
+        text, source = shared_weather_feed(CURRENTWEATHER_URL, cache_txt=cache_txt, timeout=60, tries=6)
         print("source:", source)
         with open(cache_txt, "w", encoding="utf-8") as f:
             f.write(text)
@@ -1584,7 +1588,7 @@ def run_egsa_region(cfg: dict):
     )
 
     # load greece geometry in EGSA, clip to bbox
-    greece = gpd.read_file(GREECE_GEOJSON_PATH)
+    greece = shared_greece_geometry()
     if greece.crs is None:
         raise RuntimeError("Greece GeoJSON has no CRS.")
     if greece.crs.to_string() != CRS_EGSA87:
@@ -1820,9 +1824,7 @@ def run_egsa_region(cfg: dict):
 
     # FTP
     try:
-        ftp_upload_file(out_png)
-        ftp_upload_file(out_latest)
-        ftp_prune_timestamped(prefix=prefix, latest_name=latest_name, keep=int(cfg.get("remote_keep", 216)))
+        ftp_publish_map((out_png, out_latest), prefix, latest_name, int(cfg.get("remote_keep", 216)))
     except Exception as e:
         print(f"⚠️ FTP upload/prune failed: {e}")
 
@@ -1928,7 +1930,7 @@ def run_cyprus():
 
     # fetch
     try:
-        text, source = robust_fetch_text(CURRENTWEATHER_URL, cache_txt=cache_txt, timeout=60, tries=6)
+        text, source = shared_weather_feed(CURRENTWEATHER_URL, cache_txt=cache_txt, timeout=60, tries=6)
         print("source:", source)
         with open(cache_txt, "w", encoding="utf-8") as f:
             f.write(text)
@@ -2209,10 +2211,7 @@ def run_cyprus():
 
     # FTP (optional). Cyprus prune pattern differs, so keep it separate:
     try:
-        ftp_upload_file(out_png)
-        ftp_upload_file(out_latest)
-        # prune cyprus timestamped
-        ftp_prune_timestamped(prefix=prefix, latest_name=latest_name, keep=144)
+        ftp_publish_map((out_png, out_latest), prefix, latest_name, 144)
     except Exception as e:
         print(f"⚠️ FTP upload/prune failed: {e}")
 
@@ -2393,6 +2392,72 @@ def main():
     if args.region in ("all", "cyprus"):
         run_cyprus()
 
+
+
+# Shared inputs are scoped to this Python process, never a cross-run stale cache.
+_SHARED_FEED = None
+_GREECE_GEOMETRY = None
+
+def shared_weather_feed(url, cache_txt, timeout=60, tries=6):
+    global _SHARED_FEED
+    if _SHARED_FEED is None:
+        started = time.perf_counter()
+        text, source = robust_fetch_text(url, cache_txt, timeout, tries)
+        expected = "Datetime TNow TMax TMin RHNow WindDirNow WindSpeedNow RainIntensity TodayRain Latitude Longitude Country webcode citygr Type Altitude Weblink".split()
+        header = text.lstrip("\ufeff").splitlines()[0].split("\t") if text.strip() else []
+        if header != expected:
+            raise RuntimeError("Weather feed has an unexpected header; HTML is not weather data.")
+        _SHARED_FEED = (text, source)
+        print(f"[TIMING] weather feed: {time.perf_counter()-started:.2f}s", flush=True)
+    else:
+        print("[feed] reusing the same validated snapshot", flush=True)
+    return _SHARED_FEED
+
+def shared_greece_geometry():
+    global _GREECE_GEOMETRY
+    if _GREECE_GEOMETRY is None:
+        _GREECE_GEOMETRY = gpd.read_file(GREECE_GEOJSON_PATH)
+    return _GREECE_GEOMETRY.copy()
+
+def ftp_publish_map(files, prefix, latest_name, keep):
+    if not ftp_enabled():
+        print("ℹ️ FTP disabled (missing env). Skipping upload/prune.")
+        return
+    ftps = ftps_connect_with_retries(FTP_HOST, FTP_USER, FTP_PASS,
+                                     attempts=6, base_sleep=5, timeout=60)
+    try:
+        for filename in files:
+            ftp_upload_file(filename, ftps=ftps)
+        ftp_prune_timestamped(prefix, latest_name, keep, ftps=ftps)
+    finally:
+        try:
+            ftps.quit()
+        except Exception:
+            ftps.close()
+
+def timed_stage(function):
+    def measured(*args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            print(f"[TIMING] {function.__name__}: {time.perf_counter()-started:.2f}s", flush=True)
+    return measured
+
+
+fetch_mtg_li_greece_flashes = timed_stage(fetch_mtg_li_greece_flashes)
+shared_greece_geometry = timed_stage(shared_greece_geometry)
+sample_altitude_vrt_m = timed_stage(sample_altitude_vrt_m)
+sample_altitude_raster_m = timed_stage(sample_altitude_raster_m)
+idw_any_neighbor = timed_stage(idw_any_neighbor)
+build_temperature_grid_local_lr_wgs = timed_stage(build_temperature_grid_local_lr_wgs)
+build_temperature_grid_local_lr_projected = timed_stage(build_temperature_grid_local_lr_projected)
+ftp_publish_map = timed_stage(ftp_publish_map)
+run_greece = timed_stage(run_greece)
+run_egsa_region = timed_stage(run_egsa_region)
+run_cyprus = timed_stage(run_cyprus)
+# Measure PNG rendering separately from calculations.
+plt.savefig = timed_stage(plt.savefig)
 
 if __name__ == "__main__":
     main()
