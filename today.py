@@ -457,23 +457,81 @@ def fetch_weathernow_text(url: str) -> str:
     if not PRIVATE_WEATHERNOW_TOKEN:
         raise SystemExit("PRIVATE_WEATHERNOW_TOKEN is not set.")
 
-    last_exc = None
+    expected_columns = [
+        "Datetime", "TNow", "TMax", "TMin", "RHNow",
+        "WindDirNow", "WindSpeedNow", "RainIntensity",
+        "TodayRain", "Latitude", "Longitude", "Country",
+        "webcode", "citygr", "Type", "Altitude", "Weblink",
+    ]
 
-    for i in range(MAX_RETRIES):
+    last_error = "Unknown download failure"
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        print(
+            f"Downloading weather feed "
+            f"(attempt {attempt}/{MAX_RETRIES})...",
+            flush=True,
+        )
+
         try:
-            r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-            if r.status_code == 415:
-                raise SystemExit("415 Unsupported Media Type while fetching protected weather feed.")
-    
-            r.raise_for_status()
-            r.encoding = "utf-8"
-            return r.text
-        except requests.exceptions.RequestException as e:
-            last_exc = e
-            print(f"🌧️ Attempt {i+1} failed: {e}")
+            response = requests.get(
+                url,
+                headers=HEADERS,
+                timeout=(30, 60),
+            )
+
+            content_type = response.headers.get("Content-Type", "")
+            print(
+                f"HTTP {response.status_code}; "
+                f"Content-Type: {content_type}",
+                flush=True,
+            )
+
+            # Authentication/configuration errors need correction,
+            # rather than repeated requests.
+            if response.status_code in (401, 403, 404, 415):
+                raise SystemExit(
+                    f"Weather feed returned HTTP {response.status_code}. "
+                    "Check the endpoint, token and hosting security rules."
+                )
+
+            response.raise_for_status()
+            response.encoding = "utf-8"
+            text = response.text.lstrip("\ufeff")
+
+            first_line = text.splitlines()[0] if text else ""
+            columns = first_line.rstrip("\r").split("\t")
+
+            if (
+                "html" in content_type.lower()
+                or columns != expected_columns
+            ):
+                last_error = (
+                    "The server returned HTML or an unexpected feed header "
+                    "instead of weathernow.txt."
+                )
+                print(last_error, flush=True)
+            else:
+                print(
+                    f"Weather feed validated: "
+                    f"{len(response.content):,} bytes.",
+                    flush=True,
+                )
+                return text
+
+        except requests.exceptions.RequestException as exc:
+            # Avoid printing exception URLs, which may contain secrets.
+            last_error = f"Network/download failure: {type(exc).__name__}"
+            print(last_error, flush=True)
+
+        if attempt < MAX_RETRIES:
+            print(f"Retrying in {DELAY} seconds...", flush=True)
             time.sleep(DELAY)
 
-    raise SystemExit(last_exc)
+    raise SystemExit(
+        f"Weather feed download failed after "
+        f"{MAX_RETRIES} attempts. {last_error}"
+    )
 
 
 def read_tabbed_df(text: str) -> pd.DataFrame:
