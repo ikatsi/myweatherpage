@@ -1513,21 +1513,65 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
     if var_col == "TMin":
         pct_below_0 = pct_area_below(0.0)
 
+        # Calculate the population living in areas where interpolated Tmin is <0°C.
+        pct_population_below_0_text = "–"
+        population_below_0_text = "–"
+
+        try:
+            population_grid = aggregate_population_to_national_grid(
+                POPULATION_PATH
+            )
+
+            total_population = float(np.sum(population_grid))
+
+            if total_population <= 0.0:
+                raise RuntimeError(
+                    "Aggregated population raster has no positive population."
+                )
+
+            below_0_mask = mapped_mask & (out < 0.0)
+            population_below_0 = float(
+                np.sum(population_grid[below_0_mask])
+            )
+            pct_population_below_0 = (
+                100.0 * population_below_0 / total_population
+            )
+
+            if 0.0 < pct_population_below_0 < 0.1:
+                pct_population_below_0_text = "<0,1%"
+            else:
+                pct_population_below_0_text = (
+                    f"{pct_population_below_0:.1f}%"
+                    .replace(".", ",")
+                )
+
+            population_below_0_text = f"{population_below_0:,.0f}"
+
+            print(
+                f"ℹ️ Tmin population <0°C: "
+                f"{population_below_0:,.0f} "
+                f"({pct_population_below_0:.1f}% of Greece)"
+            )
+
+        except Exception as e:
+            print(f"⚠️ Tmin population calculation failed: {e}")
+
         # Prominent contour lines for the Tmin map.
         special_levels = [0.0, 10.0, 20.0, 25.0, 30.0]
 
         stats_text = (
-            "Ποσοστό έκτασης επικράτειας βάσει παρεμβολής:\n"
-            f"<0°C: {pct_below_0:.1f}%".replace(".", ",")
-        )
+            "Ποσοστό έκτασης | μόνιμου πληθυσμού:\n"
+            f"<0°C: {pct_below_0:.1f}% | "
+            f"{pct_population_below_0_text} "
+            f"({population_below_0_text} άτομα)"
+        ).replace(".", ",")
 
         print(f"ℹ️ {var_col} area <0°C: {pct_below_0:.1f}% of Greece")
-
     else:
         pct_above_30 = pct_area_above(30.0)
         pct_above_37 = pct_area_above(37.0)
         pct_above_40 = pct_area_above(40.0)
-
+        
         # =========================
         # TMAX POPULATION STATISTICS
         # =========================
