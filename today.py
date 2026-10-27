@@ -1515,6 +1515,18 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
 
     if var_col == "TMin":
         pct_below_0 = pct_area_below(0.0)
+        pct_above_20 = pct_area_above(20.0)
+
+        if 0.0 < pct_above_20 < 0.1:
+            pct_above_20_text = "<0,1%"
+        else:
+            pct_above_20_text = (
+                f"{pct_above_20:.1f}%"
+                .replace(".", ",")
+            )
+
+        pct_population_above_20 = 0.0
+        pct_population_above_20_text = "–"
 
         # Calculate the population living in areas where interpolated Tmin is <0°C.
         pct_population_below_0_text = "–"
@@ -1540,6 +1552,22 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
                 100.0 * population_below_0 / total_population
             )
 
+            above_20_mask = mapped_mask & (out > 20.0)
+            population_above_20 = float(
+                np.sum(population_grid[above_20_mask])
+            )
+            pct_population_above_20 = (
+                100.0 * population_above_20 / total_population
+            )
+
+            if 0.0 < pct_population_above_20 < 0.1:
+                pct_population_above_20_text = "<0,1%"
+            else:
+                pct_population_above_20_text = (
+                    f"{pct_population_above_20:.1f}%"
+                    .replace(".", ",")
+                )
+
             if 0.0 < pct_population_below_0 < 0.1:
                 pct_population_below_0_text = "<0,1%"
             else:
@@ -1562,15 +1590,39 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
         # Prominent contour lines for the Tmin map.
         special_levels = [0.0, 10.0, 20.0, 25.0, 30.0]
 
+        tmin_stat_lines = [
+            (
+                f"<0°C: {pct_below_0:.1f}% | "
+                f"{pct_population_below_0_text} "
+                f"({population_below_0_text} άτομα)"
+            ).replace(".", ",")
+        ]
+
+        if pct_above_20 > 0.0 or pct_population_above_20 > 0.0:
+            tmin_stat_lines.append(
+                f">20°C: {pct_above_20_text} | "
+                f"{pct_population_above_20_text}"
+            )
+
         stats_text = (
             "Ποσοστό έκτασης | μόνιμου πληθυσμού:\n"
-            f"<0°C: {pct_below_0:.1f}% | "
-            f"{pct_population_below_0_text} "
-            f"({population_below_0_text} άτομα)"
-        ).replace(".", ",")
-
+            + "\n".join(tmin_stat_lines)
+        )
         print(f"ℹ️ {var_col} area <0°C: {pct_below_0:.1f}% of Greece")
     else:
+        pct_below_0 = pct_area_below(0.0)
+
+        if 0.0 < pct_below_0 < 0.1:
+            pct_below_0_text = "<0,1%"
+        else:
+            pct_below_0_text = (
+                f"{pct_below_0:.1f}%"
+                .replace(".", ",")
+            )
+
+        pct_population_below_0 = 0.0
+        pct_population_below_0_text = "–"
+
         pct_above_30 = pct_area_above(30.0)
         pct_above_37 = pct_area_above(37.0)
         pct_above_40 = pct_area_above(40.0)
@@ -1604,6 +1656,22 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
                 * mapped_population
                 / total_population
             )
+
+            below_0_mask = mapped_mask & (out < 0.0)
+            population_below_0 = float(
+                np.sum(population_grid[below_0_mask])
+            )
+            pct_population_below_0 = (
+                100.0 * population_below_0 / total_population
+            )
+
+            if 0.0 < pct_population_below_0 < 0.1:
+                pct_population_below_0_text = "<0,1%"
+            else:
+                pct_population_below_0_text = (
+                    f"{pct_population_below_0:.1f}%"
+                    .replace(".", ",")
+                )
 
             def pct_population_above(
                 threshold_c: float
@@ -1686,6 +1754,7 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
             )
 
         except Exception as e:
+            pct_population_below_0_text = "–"
             pct_population_above_30_text = "–"
             pct_population_above_37_text = "–"
             pct_population_above_40_text = "–"
@@ -1717,6 +1786,12 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
         pct_above_40_text = format_pct_with_observed_floor(pct_above_40, 40.0)
 
         tmax_stat_lines = []
+
+        if pct_below_0 > 0.0 or pct_population_below_0 > 0.0:
+            tmax_stat_lines.append(
+                f"<0°C: {pct_below_0_text} | "
+                f"{pct_population_below_0_text}"
+            )
 
         if pct_above_30_text != "0,0%" or pct_population_above_30 > 0.0:
             tmax_stat_lines.append(
