@@ -1506,6 +1506,9 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
         )
 
     # Defaults used only if the Tmax population calculation fails.
+    pct_population_above_30 = 0.0
+    pct_population_above_37 = 0.0
+    pct_population_above_40 = 0.0
     pct_population_above_30_text = "–"
     pct_population_above_37_text = "–"
     pct_population_above_40_text = "–"
@@ -1713,15 +1716,33 @@ def make_temp_map_national(df, greece_gdf, grid_x, grid_y, geo_mask,
         pct_above_37_text = format_pct_with_observed_floor(pct_above_37, 37.0)
         pct_above_40_text = format_pct_with_observed_floor(pct_above_40, 40.0)
 
-        stats_text = (
-            "Ποσοστό έκτασης | μόνιμου πληθυσμού:\n"
-            f">30°C: {pct_above_30_text} | "
-            f"{pct_population_above_30_text}\n"
-            f">37°C: {pct_above_37_text} | "
-            f"{pct_population_above_37_text}\n"
-            f">40°C: {pct_above_40_text} | "
-            f"{pct_population_above_40_text}"
-        )
+        tmax_stat_lines = []
+
+        if pct_above_30_text != "0,0%" or pct_population_above_30 > 0.0:
+            tmax_stat_lines.append(
+                f">30°C: {pct_above_30_text} | "
+                f"{pct_population_above_30_text}"
+            )
+
+        if pct_above_37_text != "0,0%" or pct_population_above_37 > 0.0:
+            tmax_stat_lines.append(
+                f">37°C: {pct_above_37_text} | "
+                f"{pct_population_above_37_text}"
+            )
+
+        if pct_above_40_text != "0,0%" or pct_population_above_40 > 0.0:
+            tmax_stat_lines.append(
+                f">40°C: {pct_above_40_text} | "
+                f"{pct_population_above_40_text}"
+            )
+
+        if tmax_stat_lines:
+            stats_text = (
+                "Ποσοστό έκτασης | μόνιμου πληθυσμού:\n"
+                + "\n".join(tmax_stat_lines)
+            )
+        else:
+            stats_text = ""
         print(f"ℹ️ {var_col} area >30°C: {pct_above_30:.1f}% of Greece")
         print(f"ℹ️ {var_col} area >37°C: {pct_above_37:.1f}% of Greece")
         print(f"ℹ️ {var_col} area >40°C: {pct_above_40:.1f}% of Greece")
