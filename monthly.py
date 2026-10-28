@@ -767,6 +767,23 @@ data = data.dropna(subset=["latitude", "longitude"]).copy()
 today_date = athens_now.date()
 
 data_precip = apply_family_exclusions(data, "precip", today_date, EXCLUSION_RULES)
+
+# Monthly precipitation quality exclusions; temperature data stays independent.
+# Remove a station here once its precipitation observations have been corrected.
+MONTHLY_PRECIP_EXCLUDES = {
+    'hnms3_martino',
+    'hnms3_pissonas',
+    'hnms3_tanagra',
+    'wu_erythres',
+    'hnms3_velo',
+    'hnms3_voula',
+    'hnms3_agioskonstantinos',
+    'age_penteskoufi',
+}
+data_precip = data_precip.loc[
+    ~data_precip["webcode"].map(_norm_webcode).isin(MONTHLY_PRECIP_EXCLUDES)
+].copy()
+
 data_temp = apply_family_exclusions(data, "temperature", today_date, EXCLUSION_RULES)
 
 if data_precip.empty and data_temp.empty:
